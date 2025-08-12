@@ -169,4 +169,7 @@ void __init intel_rdt_mbm_apply_quirk(void);
 
 void rdt_domain_reconfigure_cdp(struct rdt_resource *r);
 
+int __init resctrl_pmu_init(void);
+void resctrl_pmu_exit(void);
+
 #endif /* _ASM_X86_RESCTRL_INTERNAL_H */

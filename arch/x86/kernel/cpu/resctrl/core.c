@@ -1032,6 +1032,10 @@ static int __init resctrl_arch_late_init(void)
 	for_each_mon_capable_rdt_resource(r)
 		pr_info("%s monitoring detected\n", r->name);
 
+	ret = resctrl_pmu_init();
+	if (ret)
+		pr_warn("Failed to initialize resctrl PMU: %d\n", ret);
+
 	return 0;
 }
 
@@ -1039,6 +1043,7 @@ late_initcall(resctrl_arch_late_init);
 
 static void __exit resctrl_arch_exit(void)
 {
+	resctrl_pmu_exit();
 	cpuhp_remove_state(rdt_online);
 
 	resctrl_exit();
