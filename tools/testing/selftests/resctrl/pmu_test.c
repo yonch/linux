@@ -93,7 +93,7 @@ static int test_resctrl_pmu_event(int pmu_type, int mon_fd)
 
 static bool pmu_feature_check(const struct resctrl_test *test)
 {
-	return resctrl_mon_feature_exists("L3", "llc_occupancy");
+	return resctrl_mon_feature_exists("L3_MON", "llc_occupancy");
 }
 
 static int pmu_run_test(const struct resctrl_test *test, const struct user_params *uparams)
