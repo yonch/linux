@@ -126,14 +126,6 @@ static int resctrl_event_init(struct perf_event *event)
 	struct rdtgroup *rdtgrp;
 	int fd;
 
-	/* Only accept events for this PMU */
-	if (event->attr.type != event->pmu->type)
-		return -ENOENT;
-
-	/* No sampling support */
-	if (is_sampling_event(event))
-		return -EINVAL;
-
 	/* Extract file descriptor from config */
 	fd = (int)event->attr.config;
 	if (fd < 0)
