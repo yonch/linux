@@ -31,61 +31,6 @@ struct resctrl_pmu_event {
 };
 
 
-/*
- * Get rdtgroup from file descriptor with proper mutual exclusion
- * Takes an additional reference on the rdtgroup which must be released
- */
-static struct rdtgroup *get_rdtgroup_from_fd(int fd)
-{
-	struct file *file;
-	struct kernfs_open_file *of;
-	struct rdtgroup *rdtgrp;
-	struct rdtgroup *ret = ERR_PTR(-EBADF);
-	
-	file = fget(fd);
-	if (!file)
-		goto out;
-	
-	/* Basic validation that this is a kernfs file with seq_file */
-	ret = ERR_PTR(-EINVAL);
-	if (!file->f_op || !file->private_data)
-		goto out_fput;
-	
-	/* For kernfs files, private_data points to seq_file, and seq_file->private is kernfs_open_file */
-	of = ((struct seq_file *)file->private_data)->private;
-	if (!of)
-		goto out_fput;
-	
-	/* Validate that this is actually a resctrl monitoring file */
-	if (!of->kn || of->kn->attr.ops != &kf_mondata_ops)
-		goto out_fput;
-	
-	/* CRITICAL: Hold rdtgroup_mutex to prevent race with release callback */
-	mutex_lock(&rdtgroup_mutex);
-	
-	/* Get rdtgroup from kernfs_open_file - similar to pseudo_lock pattern */
-	ret = ERR_PTR(-ENOENT);
-	rdtgrp = of->priv;
-	if (!rdtgrp)
-		/* File was drained - release callback already called */
-		goto out_unlock;
-	
-	if (rdtgrp->flags & RDT_DELETED)
-		/* rdtgroup marked for deletion */
-		goto out_unlock;
-	
-	/* Take reference using the rdtgroup API */
-	rdtgroup_get(rdtgrp);
-	ret = rdtgrp;
-	/* Fall through to cleanup */
-
-out_unlock:
-	mutex_unlock(&rdtgroup_mutex);
-out_fput:
-	fput(file);
-out:
-	return ret;
-}
 
 /*
  * Clean up event resources - called when event is destroyed
@@ -123,18 +68,57 @@ static void resctrl_event_destroy(struct perf_event *event)
 static int resctrl_event_init(struct perf_event *event)
 {
 	struct resctrl_pmu_event *resctrl_event;
+	struct file *file;
+	struct kernfs_open_file *of;
 	struct rdtgroup *rdtgrp;
 	int fd;
+	int ret;
 
 	/* Extract file descriptor from config */
 	fd = (int)event->attr.config;
 	if (fd < 0)
 		return -EINVAL;
 
-	/* Get rdtgroup with proper protection and reference counting */
-	rdtgrp = get_rdtgroup_from_fd(fd);
-	if (IS_ERR(rdtgrp))
-		return PTR_ERR(rdtgrp);
+	/* Get file from file descriptor */
+	file = fget(fd);
+	if (!file)
+		return -EBADF;
+
+	/* Basic validation that this is a kernfs file with seq_file */
+	ret = -EINVAL;
+	if (!file->f_op || !file->private_data)
+		goto out_fput;
+
+	/* For kernfs files, private_data points to seq_file, and seq_file->private is kernfs_open_file */
+	of = ((struct seq_file *)file->private_data)->private;
+	if (!of)
+		goto out_fput;
+
+	/* Validate that this is actually a resctrl monitoring file */
+	if (!of->kn || of->kn->attr.ops != &kf_mondata_ops)
+		goto out_fput;
+
+	/* CRITICAL: Hold rdtgroup_mutex to prevent race with release callback */
+	mutex_lock(&rdtgroup_mutex);
+
+	/* Get rdtgroup from kernfs_open_file - similar to pseudo_lock pattern */
+	ret = -ENOENT;
+	rdtgrp = of->priv;
+	if (!rdtgrp) {
+		/* File was drained - release callback already called */
+		goto out_unlock;
+	}
+
+	if (rdtgrp->flags & RDT_DELETED) {
+		/* rdtgroup marked for deletion */
+		goto out_unlock;
+	}
+
+	/* Take reference using the rdtgroup API */
+	rdtgroup_get(rdtgrp);
+
+	mutex_unlock(&rdtgroup_mutex);
+	fput(file);
 
 	/* Allocate our private event data */
 	resctrl_event = kzalloc(sizeof(*resctrl_event), GFP_KERNEL);
@@ -159,6 +143,12 @@ static int resctrl_event_init(struct perf_event *event)
 	pr_info("  cpu_mask=%*pbl\n", cpumask_pr_args(&rdtgrp->cpu_mask));
 
 	return 0;
+
+out_unlock:
+	mutex_unlock(&rdtgroup_mutex);
+out_fput:
+	fput(file);
+	return ret;
 }
 
 
