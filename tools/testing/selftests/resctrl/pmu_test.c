@@ -238,12 +238,39 @@ static int pmu_run_test(const struct resctrl_test *test, const struct user_param
 		return ret;
 	}
 
+	if (ret == 0) {
+		ksft_print_msg("Resctrl PMU test completed successfully\n");
+		ksft_print_msg("Check dmesg for kernel log message with file path\n");
+	}
+
+	return ret;
+}
+
+static bool pmu_safety_feature_check(const struct resctrl_test *test)
+{
+	return resctrl_mon_feature_exists("L3_MON", "llc_occupancy");
+}
+
+static int pmu_safety_run_test(const struct resctrl_test *test, const struct user_params *uparams)
+{
+	int pmu_type, ret;
+
+	ksft_print_msg("Testing resctrl PMU file access safety\n");
+
+	/* Find the resctrl PMU type */
+	pmu_type = find_pmu_type(RESCTRL_PMU_NAME);
+	if (pmu_type < 0) {
+		ksft_print_msg("Resctrl PMU not found - this indicates the PMU is not registered\n");
+		return -1;
+	}
+
+	ksft_print_msg("Found resctrl PMU with type: %d\n", pmu_type);
+
 	/* Run the safety test to ensure only appropriate files work */
 	ret = test_resctrl_pmu_safety(pmu_type);
 
 	if (ret == 0) {
-		ksft_print_msg("All resctrl PMU tests completed successfully\n");
-		ksft_print_msg("Check dmesg for kernel log message with file path\n");
+		ksft_print_msg("Resctrl PMU safety test completed successfully\n");
 	} else {
 		ksft_print_msg("Resctrl PMU safety test failed\n");
 	}
@@ -258,5 +285,15 @@ struct resctrl_test pmu_test = {
 	.vendor_specific = 0,
 	.feature_check = pmu_feature_check,
 	.run_test = pmu_run_test,
+	.cleanup = NULL,
+};
+
+struct resctrl_test pmu_open_allowed_files_test = {
+	.name = "PMU_OPEN_ALLOWED_FILES",
+	.group = "pmu",
+	.resource = "L3",
+	.vendor_specific = 0,
+	.feature_check = pmu_safety_feature_check,
+	.run_test = pmu_safety_run_test,
 	.cleanup = NULL,
 };
