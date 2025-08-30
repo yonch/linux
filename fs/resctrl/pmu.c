@@ -140,8 +140,15 @@ static int resctrl_event_init(struct perf_event *event)
 		return ret;
 	}
 
+	/* Require that a specific CPU is specified for monitoring */
+	if (event->cpu < 0) {
+		ret = -EINVAL;
+		rdtgroup_put(rdtgrp);
+		return ret;
+	}
+
 	/* Validate that the requested CPU is in the valid CPU mask for this monitoring file */
-	if (event->cpu >= 0 && !cpumask_test_cpu(event->cpu, cpumask)) {
+	if (!cpumask_test_cpu(event->cpu, cpumask)) {
 		ret = -EINVAL;
 		rdtgroup_put(rdtgrp);
 		return ret;
