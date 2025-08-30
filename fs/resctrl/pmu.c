@@ -134,11 +134,6 @@ static int resctrl_event_init(struct perf_event *event)
 	if (is_sampling_event(event))
 		return -EINVAL;
 
-	/* No filtering support */
-	if (event->attr.exclude_user || event->attr.exclude_kernel ||
-	    event->attr.exclude_hv || event->attr.exclude_idle)
-		return -EINVAL;
-
 	/* Extract file descriptor from config */
 	fd = (int)event->attr.config;
 	if (fd < 0)
