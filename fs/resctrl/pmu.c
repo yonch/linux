@@ -28,6 +28,8 @@ static struct pmu resctrl_pmu;
  */
 struct resctrl_pmu_event {
 	struct rdtgroup *rdtgrp;	/* Reference to rdtgroup being monitored */
+	struct rmid_read rr;		/* RMID read setup for monitoring */
+	cpumask_t *cpumask;		/* Valid CPUs for this monitoring file */
 };
 
 
@@ -71,6 +73,9 @@ static int resctrl_event_init(struct perf_event *event)
 	struct file *file;
 	struct kernfs_open_file *of;
 	struct rdtgroup *rdtgrp;
+	struct mon_data *md;
+	struct rmid_read rr = {0};
+	cpumask_t *cpumask;
 	int fd;
 	int ret;
 
@@ -117,8 +122,30 @@ static int resctrl_event_init(struct perf_event *event)
 	/* Take reference using the rdtgroup API */
 	rdtgroup_get(rdtgrp);
 
+	/* Extract mon_data from kernfs node - similar to rdtgroup_mondata_show */
+	md = of->kn->priv;
+	if (!md) {
+		ret = -EIO;
+		rdtgroup_put(rdtgrp);
+		goto out_unlock;
+	}
+
 	mutex_unlock(&rdtgroup_mutex);
 	fput(file);
+
+	/* Setup RMID read structure and get valid CPU mask */
+	ret = mon_event_read_setup(&rr, &cpumask, md, rdtgrp);
+	if (ret) {
+		rdtgroup_put(rdtgrp);
+		return ret;
+	}
+
+	/* Validate that the requested CPU is in the valid CPU mask for this monitoring file */
+	if (event->cpu >= 0 && !cpumask_test_cpu(event->cpu, cpumask)) {
+		ret = -EINVAL;
+		rdtgroup_put(rdtgrp);
+		return ret;
+	}
 
 	/* Allocate our private event data */
 	resctrl_event = kzalloc(sizeof(*resctrl_event), GFP_KERNEL);
@@ -128,19 +155,22 @@ static int resctrl_event_init(struct perf_event *event)
 	}
 
 	resctrl_event->rdtgrp = rdtgrp;
+	resctrl_event->rr = rr;
+	resctrl_event->cpumask = cpumask;
 	event->pmu_private = resctrl_event;
 
 	/* Set destroy callback for proper cleanup */
 	event->destroy = resctrl_event_destroy;
 
-	/* Log comprehensive rdtgroup information */
-	pr_info("PMU event initialized: fd=%d\n", fd);
+	/* Log comprehensive event information */
+	pr_info("PMU event initialized: fd=%d, cpu=%d\n", fd, event->cpu);
 	pr_info("  rdtgroup: closid=%u, rmid=%u, waitcount=%d\n",
 		rdtgrp->closid, rdtgrp->mon.rmid, atomic_read(&rdtgrp->waitcount));
 	pr_info("  type=%s, mode=%d, flags=0x%x\n",
 		rdtgrp->type == RDTCTRL_GROUP ? "CTRL" : "MON",
 		rdtgrp->mode, rdtgrp->flags);
-	pr_info("  cpu_mask=%*pbl\n", cpumask_pr_args(&rdtgrp->cpu_mask));
+	pr_info("  monitoring: evtid=%d, valid_cpus=%*pbl\n",
+		rr.evtid, cpumask_pr_args(cpumask));
 
 	return 0;
 
