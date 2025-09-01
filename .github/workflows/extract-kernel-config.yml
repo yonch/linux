@@ -110,10 +110,30 @@ jobs:
           # and create a minimal version based on loaded modules
           
           # Check if we have the running kernel's config available
+          mkdir -p /tmp/localmod-config
+          
           if [ -f /proc/config.gz ]; then
             echo "✅ Using /proc/config.gz as base for localmodconfig"
-            mkdir -p /tmp/localmod-config
             zcat /proc/config.gz > /tmp/localmod-config/current-config
+          elif ls /boot/config-* 1> /dev/null 2>&1; then
+            echo "✅ Using /boot/config-* as base for localmodconfig"
+            # Use the config that matches the running kernel version if available
+            KERNEL_VERSION=$(uname -r)
+            if [ -f "/boot/config-${KERNEL_VERSION}" ]; then
+              echo "📍 Found exact match: /boot/config-${KERNEL_VERSION}"
+              cp "/boot/config-${KERNEL_VERSION}" /tmp/localmod-config/current-config
+            else
+              echo "📍 Using most recent config from /boot"
+              cp $(ls -t /boot/config-* | head -1) /tmp/localmod-config/current-config
+            fi
+          else
+            echo "❌ Cannot find kernel config in /proc/config.gz or /boot/config-*"
+            echo "CONFIG_NOT_AVAILABLE=y" > /tmp/localmod-config/error.txt
+            echo "::error title=Localmod Config Failed::No kernel config found in /proc/config.gz or /boot/config-*"
+            exit 1
+          fi
+          
+          if [ -f /tmp/localmod-config/current-config ]; then
             
             # Extract information about currently loaded modules and hardware
             echo "🖥️ Extracting hardware and module information..."
@@ -163,29 +183,6 @@ jobs:
             echo "✅ Generated localmod information (modules: $(wc -l < /tmp/localmod-config/loaded-module-names.txt))"
             echo "📦 Files created:"
             ls -la /tmp/localmod-config/
-            
-          else
-            echo "❌ Cannot generate localmodconfig - /proc/config.gz not available"
-            echo "🔍 Checking for alternative kernel config sources..."
-            
-            # Check if we can find config in other locations
-            echo "Available /boot files:"
-            ls -la /boot/ || echo "No /boot directory access"
-            
-            echo "Checking /sys/kernel/config:"
-            ls -la /sys/kernel/config/ 2>/dev/null || echo "No /sys/kernel/config available"
-            
-            echo "Checking kernel compile flags:"
-            cat /proc/version
-            
-            echo "Checking if CONFIG_IKCONFIG is enabled:"
-            grep -i "CONFIG_IKCONFIG" /boot/config-* 2>/dev/null || echo "Cannot find CONFIG_IKCONFIG info"
-            
-            mkdir -p /tmp/localmod-config
-            echo "CONFIG_NOT_AVAILABLE=y" > /tmp/localmod-config/error.txt
-            
-            echo "::error title=Localmod Config Failed::Cannot generate localmodconfig - /proc/config.gz not available. The running kernel was not compiled with CONFIG_IKCONFIG_PROC=y"
-            exit 1
           fi
           
       - name: Extract initramfs-tools configuration
