@@ -166,8 +166,26 @@ jobs:
             
           else
             echo "❌ Cannot generate localmodconfig - /proc/config.gz not available"
+            echo "🔍 Checking for alternative kernel config sources..."
+            
+            # Check if we can find config in other locations
+            echo "Available /boot files:"
+            ls -la /boot/ || echo "No /boot directory access"
+            
+            echo "Checking /sys/kernel/config:"
+            ls -la /sys/kernel/config/ 2>/dev/null || echo "No /sys/kernel/config available"
+            
+            echo "Checking kernel compile flags:"
+            cat /proc/version
+            
+            echo "Checking if CONFIG_IKCONFIG is enabled:"
+            grep -i "CONFIG_IKCONFIG" /boot/config-* 2>/dev/null || echo "Cannot find CONFIG_IKCONFIG info"
+            
             mkdir -p /tmp/localmod-config
             echo "CONFIG_NOT_AVAILABLE=y" > /tmp/localmod-config/error.txt
+            
+            echo "::error title=Localmod Config Failed::Cannot generate localmodconfig - /proc/config.gz not available. The running kernel was not compiled with CONFIG_IKCONFIG_PROC=y"
+            exit 1
           fi
           
       - name: Extract initramfs-tools configuration
