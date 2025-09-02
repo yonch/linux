@@ -195,6 +195,12 @@ jobs:
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
           
+          # Clear Debian-specific certificate paths that don't exist in build environment
+          echo "🔧 Clearing Debian-specific certificate paths..."
+          scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+          scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+          echo "✅ Certificate paths cleared to avoid build errors"
+          
           # Apply final configuration resolution
           KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
           
