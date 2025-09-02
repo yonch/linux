@@ -385,10 +385,10 @@ jobs:
           path: build.log
           retention-days: 14
 
-      - name: Create GitHub Release
-        id: create_release
+      - name: Generate release information
+        id: release_info
         run: |
-          echo "🚀 Creating GitHub release with kernel binaries..."
+          echo "🚀 Preparing release information..."
           
           # Generate release tag with current datetime
           RELEASE_TAG="resctrl-perf-$(date -u +%Y%m%d-%H%M%S)"
@@ -436,93 +436,56 @@ jobs:
           - Debug features disabled for production performance
           EOF
           
-          # Create the release
-          gh release create "$RELEASE_TAG" \
-            --title "Resctrl PMU Kernel - $KERNEL_VERSION" \
-            --notes-file release-notes.md \
-            --target "${{ github.sha }}" \
-            --latest
-          
-          # Upload kernel artifacts to the release
-          echo "📦 Uploading kernel artifacts to release..."
-          
-          if [ -f "artifacts/bzImage" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/bzImage --clobber
-            echo "✅ bzImage uploaded"
-          fi
-          
-          if [ -f "artifacts/vmlinux" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/vmlinux --clobber
-            echo "✅ vmlinux uploaded"
-          fi
-          
-          if [ -f "artifacts/System.map" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/System.map --clobber
-            echo "✅ System.map uploaded"
-          fi
-          
-          if [ -f "artifacts/kernel-config" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/kernel-config --clobber
-            echo "✅ kernel-config uploaded"
-          fi
-          
-          if [ -f "artifacts/build-summary.txt" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/build-summary.txt --clobber
-            echo "✅ build-summary.txt uploaded"
-          fi
-          
-          # Upload initrd if it exists (should be built in previous step)
-          echo "📦 Uploading initrd from artifacts..."
-          if [ -f "artifacts/initrd.img" ]; then
-            gh release upload "$RELEASE_TAG" artifacts/initrd.img --clobber
-            echo "✅ initrd.img uploaded"
-            
-            if [ -f "artifacts/initrd.sha256" ]; then
-              gh release upload "$RELEASE_TAG" artifacts/initrd.sha256 --clobber
-              echo "✅ initrd.sha256 uploaded"
-            fi
-          else
-            echo "⚠️ No initrd.img found in artifacts directory"
-            echo "Available files in artifacts:"
-            ls -la artifacts/ || echo "No artifacts directory found"
-          fi
-          
-          # Create modules archive if modules exist
+          # Prepare modules archive if modules exist
           if [ "$(find artifacts -name "*.ko" 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "📦 Creating modules archive..."
             cd artifacts
-            tar -czf "../modules-${KERNEL_VERSION}.tar.gz" $(find . -name "*.ko" | head -100)
+            tar -czf "modules-${KERNEL_VERSION}.tar.gz" $(find . -name "*.ko" | head -100)
             cd ..
-            gh release upload "$RELEASE_TAG" "modules-${KERNEL_VERSION}.tar.gz" --clobber
-            echo "✅ modules archive uploaded"
+            echo "✅ modules archive created"
           fi
           
-          # Build and upload resctrl tests
+          # Build resctrl tests
           echo "🧪 Building resctrl tests for release..."
           if [ -d "tools/testing/selftests/resctrl" ]; then
             cd tools/testing/selftests/resctrl
             make clean && make
             if [ -f "resctrl_tests" ]; then
-              cd ../../../..
-              gh release upload "$RELEASE_TAG" tools/testing/selftests/resctrl/resctrl_tests --clobber
-              echo "✅ resctrl_tests uploaded"
+              cp resctrl_tests ../../../../artifacts/
+              echo "✅ resctrl_tests built"
             else
               echo "⚠️ resctrl_tests build failed"
-              cd ../../../..
             fi
+            cd ../../../..
           else
             echo "⚠️ resctrl test directory not found"
           fi
           
-          echo "🎯 Release created successfully!"
-          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/$RELEASE_TAG"
-          
           # Output for later steps
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "release_url=https://github.com/${{ github.repository }}/releases/tag/$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "release_name=Resctrl PMU Kernel - $KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ github.token }}
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.release_info.outputs.release_tag }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          bodyFile: release-notes.md
+          artifacts: |
+            artifacts/bzImage
+            artifacts/vmlinux
+            artifacts/System.map
+            artifacts/kernel-config
+            artifacts/build-summary.txt
+            artifacts/initrd.img
+            artifacts/initrd.sha256
+            artifacts/modules-*.tar.gz
+            artifacts/resctrl_tests
+          artifactErrorsFailBuild: false
+          makeLatest: true
+          token: ${{ github.token }}
 
       - name: Build completion summary
         run: |
