@@ -75,13 +75,13 @@ jobs:
           cd /tmp/kernel
           
           echo "Downloading bzImage..."
-          if ! gh release download "$LATEST_RELEASE_TAG" --pattern "bzImage" --output bzImage; then
+          if ! gh release download "$LATEST_RELEASE_TAG" --repo "${{ github.repository }}" --pattern "bzImage" --output bzImage; then
             echo "❌ Failed to download bzImage"
             exit 1
           fi
           
           echo "Downloading initrd.img..."
-          if ! gh release download "$LATEST_RELEASE_TAG" --pattern "initrd.img" --output initrd.img; then
+          if ! gh release download "$LATEST_RELEASE_TAG" --repo "${{ github.repository }}" --pattern "initrd.img" --output initrd.img; then
             echo "❌ Failed to download initrd.img"
             exit 1
           fi
@@ -432,7 +432,7 @@ jobs:
           
           echo "Downloading from release: $LATEST_RELEASE_TAG"
           
-          if gh release download "$LATEST_RELEASE_TAG" --pattern "resctrl_tests" --output ./resctrl_tests; then
+          if gh release download "$LATEST_RELEASE_TAG" --repo "${{ github.repository }}" --pattern "resctrl_tests" --output ./resctrl_tests; then
             echo "✅ Test binary downloaded"
             chmod +x ./resctrl_tests
             ls -la ./resctrl_tests
