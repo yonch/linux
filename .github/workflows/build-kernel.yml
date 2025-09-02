@@ -114,7 +114,6 @@ jobs:
         with:
           name: localmod-config-${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}
           path: ./localmod-artifacts/
-        continue-on-error: true
         
       - name: Extract and prepare localmodconfig
         if: inputs.build-type == 'localmod' || !inputs.build-type
@@ -133,12 +132,17 @@ jobs:
               fi
               cd ..
             else
-              echo "⚠️ Localmodconfig artifact incomplete, falling back to defconfig"
-              echo "FALLBACK_CONFIG=defconfig" >> $GITHUB_ENV
+              echo "❌ Localmodconfig artifact incomplete - missing current-config file"
+              echo "The artifact exists but doesn't contain the required configuration."
+              echo "Please re-run the extract-kernel-config workflow to generate a proper localmodconfig."
+              exit 1
             fi
           else
-            echo "⚠️ No localmodconfig artifact found, falling back to defconfig"
-            echo "FALLBACK_CONFIG=defconfig" >> $GITHUB_ENV
+            echo "❌ Localmodconfig artifact not found"
+            echo "For localmod build type, you must first run the extract-kernel-config workflow"
+            echo "to generate localmodconfig for instance type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
+            echo "and image type: ${{ inputs.image-type || 'ubuntu-24.04' }}"
+            exit 1
           fi
 
       - name: Configure kernel
@@ -149,18 +153,18 @@ jobs:
           if [ "${{ inputs.build-type }}" = "tinyconfig" ]; then
             echo "Using tinyconfig (minimal kernel)"
             make tinyconfig
-          elif [ "${{ inputs.build-type }}" = "defconfig" ] || [ "$FALLBACK_CONFIG" = "defconfig" ]; then
+          elif [ "${{ inputs.build-type }}" = "defconfig" ]; then
             echo "Using defconfig (default kernel config)"
             make defconfig
           else
-            if [ -f ".config" ]; then
-              echo "Using localmodconfig (optimized for target hardware)"
-              # Resolve any missing dependencies
-              make olddefconfig
-            else
-              echo "Fallback to defconfig"
-              make defconfig
+            echo "Using localmodconfig (optimized for target hardware)"
+            # At this point .config should exist from the extraction step
+            if [ ! -f ".config" ]; then
+              echo "❌ ERROR: No .config file found after localmodconfig extraction"
+              exit 1
             fi
+            # Resolve any missing dependencies
+            make olddefconfig
           fi
 
           # Apply build optimizations
