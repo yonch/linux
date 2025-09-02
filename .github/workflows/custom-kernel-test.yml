@@ -314,29 +314,34 @@ jobs:
           # Create a marker file to verify kexec happened
           echo "${{ github.run_id }}" > /opt/kexec-marker
           
-          # Install at package if not available
-          if ! command -v at &> /dev/null; then
-            echo "Installing at package..."
-            apt-get update && apt-get install -y at
-            systemctl start atd
-          fi
+          # Create a systemd service to perform kexec
+          cat > /etc/systemd/system/perform-kexec.service << 'EOF'
+          [Unit]
+          Description=Perform kexec to custom kernel
+          DefaultDependencies=no
+          After=basic.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'sleep 15 && echo "Executing kexec now..." >> /var/log/kexec-setup.log && sync && kexec -e'
+          StandardOutput=journal+console
+          StandardError=journal+console
+          EOF
           
-          # Schedule kexec using at command (runs independently of any session)
-          echo "🚀 Scheduling kexec to run in 1 minute..."
-          echo "sync; sleep 5; echo 'Executing kexec now...' >> /var/log/kexec-setup.log; kexec -e" | at now + 1 minute
+          # Enable and start the kexec service (no background & needed!)
+          echo "🚀 Starting kexec service..."
+          systemctl daemon-reload
+          systemctl enable perform-kexec.service
+          systemctl start perform-kexec.service
           
-          # Also create a cron job as backup
-          echo "Creating backup cron job..."
-          (crontab -l 2>/dev/null; echo "* * * * * sleep 30 && if [ -f /opt/kexec-marker ]; then rm /opt/kexec-marker; sync; kexec -e; fi") | crontab -
+          # Check service status
+          echo "Service status:"
+          systemctl status perform-kexec.service --no-pager || true
           
           echo "status=kexec-initiated" >> $GITHUB_OUTPUT
           
-          echo "✅ Kexec scheduled. The system will reboot into the custom kernel in 60 seconds."
+          echo "✅ Kexec service started. The system will reboot into the custom kernel in 15 seconds."
           echo "Job completing now to allow kexec to proceed..."
-          
-          # Show scheduled jobs
-          echo "Scheduled at jobs:"
-          atq
           
           # Exit to complete the job
           exit 0
@@ -389,9 +394,9 @@ jobs:
           echo "⏳ Waiting for custom kernel runner to come online..."
           echo "Runner label: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}"
           
-          # Wait for kexec to complete (scheduled for 1 minute)
-          echo "Waiting 90 seconds for kexec to complete..."
-          sleep 90
+          # Wait for kexec to complete (scheduled for 15 seconds)
+          echo "Waiting 30 seconds for kexec to complete..."
+          sleep 30
           
           # Now wait for the runner to register and come online
           chmod +x .github/scripts/runner-registration.sh
