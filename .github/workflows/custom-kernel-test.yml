@@ -322,17 +322,23 @@ jobs:
           After=basic.target
 
           [Service]
-          Type=oneshot
-          ExecStart=/bin/bash -c 'sleep 15 && echo "Executing kexec now..." >> /var/log/kexec-setup.log && sync && kexec -e'
+          Type=forking
+          ExecStart=/bin/bash -c 'nohup bash -c "sleep 15 && echo Executing kexec now... >> /var/log/kexec-setup.log && sync && kexec -e" </dev/null >/dev/null 2>&1 & echo $! > /var/run/kexec.pid'
+          PIDFile=/var/run/kexec.pid
           StandardOutput=journal+console
           StandardError=journal+console
+          
+          [Install]
+          WantedBy=multi-user.target
           EOF
           
-          # Enable and start the kexec service (no background & needed!)
+          # Start the kexec service with --no-block so we don't wait
           echo "🚀 Starting kexec service..."
           systemctl daemon-reload
-          systemctl enable perform-kexec.service
-          systemctl start perform-kexec.service
+          systemctl start --no-block perform-kexec.service
+          
+          # Give it a moment to start
+          sleep 1
           
           # Check service status
           echo "Service status:"
