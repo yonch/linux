@@ -2,10 +2,6 @@ name: Custom Kernel Test v2 - Resctrl PMU
 on: 
   workflow_dispatch:  # Manual trigger for testing
     inputs:
-      build-id:
-        description: 'Build ID for the kernel to test (Git commit hash)'
-        required: true
-        type: string
       instance-type:
         description: 'EC2 instance type to use'
         required: false
@@ -122,7 +118,22 @@ jobs:
             
             # Extract modules to the correct location
             echo "Extracting modules to /lib/modules/$KERNEL_VERSION..."
-            tar -xzf "$MODULES_ARCHIVE" -C "/lib/modules/$KERNEL_VERSION" --strip-components=1
+            # Extract to a temp location first to check structure
+            TEMP_DIR="/tmp/modules-extract"
+            mkdir -p "$TEMP_DIR"
+            tar -xzf "$MODULES_ARCHIVE" -C "$TEMP_DIR"
+            
+            # Move modules to the correct location, preserving kernel directory structure
+            if [ -d "$TEMP_DIR/artifacts" ]; then
+              # Modules are under artifacts/ in the archive
+              cp -r "$TEMP_DIR"/artifacts/* "/lib/modules/$KERNEL_VERSION/"
+            else
+              # Modules are at root of archive
+              cp -r "$TEMP_DIR"/* "/lib/modules/$KERNEL_VERSION/"
+            fi
+            
+            # Clean up temp directory
+            rm -rf "$TEMP_DIR"
             
             # Generate module dependencies
             echo "Running depmod to generate module dependencies..."
