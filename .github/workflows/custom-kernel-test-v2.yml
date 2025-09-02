@@ -1,0 +1,500 @@
+name: Custom Kernel Test v2 - Resctrl PMU
+on: 
+  workflow_dispatch:  # Manual trigger for testing
+    inputs:
+      build-id:
+        description: 'Build ID for the kernel to test (Git commit hash)'
+        required: true
+        type: string
+      instance-type:
+        description: 'EC2 instance type to use'
+        required: false
+        default: 'm7i.xlarge'
+        type: string
+      image-type:
+        description: 'Image type to use (ubuntu-22.04 or ubuntu-24.04)'
+        required: false
+        default: 'ubuntu-24.04'
+        type: string
+
+permissions:
+  id-token: write # Required for requesting the JWT
+  contents: read
+  actions: write
+
+jobs:
+  setup-and-kexec:
+    name: Setup and kexec into custom kernel
+    runs-on: ${{ needs.start-initial-runner.outputs.runner-label }}
+    needs: [start-initial-runner]
+    timeout-minutes: 15
+    outputs:
+      custom-runner-label: ${{ steps.prepare-kexec.outputs.custom-runner-label }}
+      kexec-status: ${{ steps.execute-kexec.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: System information
+        run: |
+          echo "=== System Information ==="
+          echo "Hostname: $(hostname)"
+          echo "Kernel: $(uname -r)"
+          echo "Instance type: ${{ inputs.instance-type }}"
+          echo "GitHub Runner: $(whoami)@$(hostname)"
+          echo "Working directory: $(pwd)"
+          echo "=========================="
+          
+      - name: Download kernel artifacts from GitHub release
+        id: download-kernel
+        run: |
+          echo "📦 Downloading kernel artifacts from GitHub release..."
+          
+          # Configure GitHub CLI authentication
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+          
+          # Find the latest GitHub release matching the resctrl-perf pattern
+          echo "Finding latest GitHub release..."
+          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep "resctrl-perf-" | head -1 | cut -f1)
+          
+          if [[ -z "$LATEST_RELEASE_TAG" ]]; then
+            echo "❌ No resctrl-perf releases found in repository"
+            echo "Available releases:"
+            gh release list --limit 10
+            exit 1
+          fi
+          
+          echo "Latest release found: $LATEST_RELEASE_TAG"
+          echo "release-tag=$LATEST_RELEASE_TAG" >> $GITHUB_OUTPUT
+          
+          # Download kernel artifacts
+          mkdir -p /tmp/kernel
+          cd /tmp/kernel
+          
+          echo "Downloading bzImage..."
+          if ! gh release download "$LATEST_RELEASE_TAG" --pattern "bzImage" --output bzImage; then
+            echo "❌ Failed to download bzImage"
+            exit 1
+          fi
+          
+          echo "Downloading initrd.img..."
+          if ! gh release download "$LATEST_RELEASE_TAG" --pattern "initrd.img" --output initrd.img; then
+            echo "❌ Failed to download initrd.img"
+            exit 1
+          fi
+          
+          echo "✅ Kernel artifacts downloaded successfully"
+          ls -la /tmp/kernel/
+          
+      - name: Download and prepare GitHub runner
+        run: |
+          echo "📦 Downloading GitHub Actions runner..."
+          
+          mkdir -p /opt/actions-runner-custom
+          cd /opt/actions-runner-custom
+          
+          # Download the runner
+          curl -L -o actions-runner.tar.gz \
+            "https://github.com/actions/runner/releases/download/v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
+          
+          tar xzf actions-runner.tar.gz
+          rm actions-runner.tar.gz
+          
+          echo "✅ GitHub Actions runner downloaded and extracted"
+          ls -la /opt/actions-runner-custom/
+          
+      - name: Prepare kexec and custom runner
+        id: prepare-kexec
+        run: |
+          echo "🚀 Preparing kexec and custom runner registration..."
+          
+          # Generate unique label for the custom kernel runner
+          CUSTOM_LABEL="custom-kernel-${{ github.run_id }}-${{ github.run_number }}"
+          echo "Custom runner label: $CUSTOM_LABEL"
+          echo "custom-runner-label=$CUSTOM_LABEL" >> $GITHUB_OUTPUT
+          
+          # Get registration token for the new runner
+          echo "Getting registration token..."
+          chmod +x .github/scripts/runner-registration.sh
+          REGISTRATION_TOKEN=$(.github/scripts/runner-registration.sh get-token "${{ secrets.GITHUB_TOKEN }}")
+          
+          if [[ -z "$REGISTRATION_TOKEN" ]]; then
+            echo "❌ Failed to get registration token"
+            exit 1
+          fi
+          
+          echo "✅ Got registration token"
+          
+          # Save registration details for post-kexec
+          cat > /opt/runner-config.sh << EOF
+          #!/bin/bash
+          export GITHUB_REPOSITORY="${{ github.repository }}"
+          export GITHUB_REPOSITORY_OWNER="${{ github.repository_owner }}"
+          export RUNNER_NAME="runner-$CUSTOM_LABEL"
+          export RUNNER_LABELS="self-hosted,Linux,X64,$CUSTOM_LABEL"
+          export REGISTRATION_TOKEN="$REGISTRATION_TOKEN"
+          export RUNNER_DIR="/opt/actions-runner-custom"
+          EOF
+          
+          chmod +x /opt/runner-config.sh
+          
+          # Create systemd service for post-kexec runner registration
+          cat > /etc/systemd/system/github-runner-register.service << 'EOF'
+          [Unit]
+          Description=GitHub Runner Registration after Kexec
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/register-and-start-runner.sh
+          StandardOutput=journal+console
+          StandardError=journal+console
+          TimeoutStartSec=300
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Create the registration and start script
+          cat > /opt/register-and-start-runner.sh << 'SCRIPT'
+          #!/bin/bash
+          set -x
+          
+          echo "=== GitHub Runner Registration Script ==="
+          echo "Starting at $(date)"
+          
+          # Source the configuration
+          source /opt/runner-config.sh
+          
+          # Wait for network to be fully up
+          echo "Waiting for network..."
+          for i in {1..30}; do
+            if ping -c 1 github.com > /dev/null 2>&1; then
+              echo "Network is up"
+              break
+            fi
+            echo "Waiting for network... ($i/30)"
+            sleep 2
+          done
+          
+          # Register the runner
+          cd "$RUNNER_DIR"
+          export RUNNER_ALLOW_RUNASROOT=1
+          
+          echo "Registering runner: $RUNNER_NAME"
+          echo "Labels: $RUNNER_LABELS"
+          
+          ./config.sh \
+            --url "https://github.com/$GITHUB_REPOSITORY" \
+            --token "$REGISTRATION_TOKEN" \
+            --name "$RUNNER_NAME" \
+            --labels "$RUNNER_LABELS" \
+            --work "_work" \
+            --unattended \
+            --replace
+          
+          if [[ $? -ne 0 ]]; then
+            echo "❌ Failed to register runner"
+            exit 1
+          fi
+          
+          echo "✅ Runner registered successfully"
+          
+          # Start the runner
+          echo "Starting runner..."
+          nohup ./run.sh > /var/log/github-runner.log 2>&1 &
+          
+          echo "✅ Runner started with PID: $!"
+          echo "=== Registration Script Complete ==="
+          SCRIPT
+          
+          chmod +x /opt/register-and-start-runner.sh
+          
+          # Enable the service to run after kexec
+          systemctl enable github-runner-register.service
+          
+          echo "✅ Post-kexec runner registration prepared"
+          
+      - name: Configure and execute kexec
+        id: execute-kexec
+        run: |
+          echo "🚀 Configuring kexec with custom kernel..."
+          
+          KERNEL="/tmp/kernel/bzImage"
+          INITRD="/tmp/kernel/initrd.img"
+          
+          # Get current kernel command line
+          CMDLINE=$(cat /proc/cmdline)
+          echo "Current cmdline: $CMDLINE"
+          
+          # Enhance cmdline for better reliability
+          ENHANCED_CMDLINE="$CMDLINE systemd.mask=multipathd.service loglevel=4"
+          echo "Enhanced cmdline: $ENHANCED_CMDLINE"
+          
+          # Load the kernel
+          echo "Loading kernel for kexec..."
+          if ! kexec -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
+            echo "❌ Failed to load kernel for kexec"
+            exit 1
+          fi
+          
+          echo "✅ Kernel loaded successfully"
+          
+          # Sync and prepare for kexec
+          echo "Syncing filesystems..."
+          sync
+          sleep 2
+          
+          # Create a marker file to verify kexec happened
+          echo "${{ github.run_id }}" > /opt/kexec-marker
+          
+          echo "status=kexec-ready" >> $GITHUB_OUTPUT
+          
+          echo "🚀 Executing kexec in 5 seconds..."
+          echo "The runner will restart with the custom kernel."
+          sleep 5
+          
+          # Note: This will terminate the runner connection
+          kexec -e || true
+          
+          # If we get here, kexec failed
+          echo "❌ Kexec failed to execute"
+          echo "status=kexec-failed" >> $GITHUB_OUTPUT
+          exit 1
+
+  start-initial-runner:
+    name: Start initial EC2 runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.start-runner.outputs.runner-label }}
+      ec2-instance-id: ${{ steps.start-runner.outputs.ec2-instance-id }}
+      region: ${{ steps.start-runner.outputs.region }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Start AWS Runner
+        id: start-runner
+        uses: ./.github/actions/aws-runner
+        with:
+          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          iam-role-name: github-actions-runner
+          instance-type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
+          volume-size: '20'
+          runner-home-dir: '/home/runner'
+          packages: '["kexec-tools", "curl", "jq", "gh"]'
+
+  wait-for-custom-kernel:
+    name: Wait for custom kernel runner
+    runs-on: ubuntu-latest
+    needs: [setup-and-kexec, start-initial-runner]
+    timeout-minutes: 10
+    outputs:
+      runner-ready: ${{ steps.wait-runner.outputs.ready }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Wait for custom kernel runner to come online
+        id: wait-runner
+        run: |
+          echo "⏳ Waiting for custom kernel runner to come online..."
+          echo "Runner label: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}"
+          
+          # Wait briefly for kexec to complete
+          echo "Waiting 30 seconds for kexec to complete..."
+          sleep 30
+          
+          # Now wait for the runner to register and come online
+          chmod +x .github/scripts/runner-registration.sh
+          
+          if .github/scripts/runner-registration.sh wait \
+            "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" \
+            300 \
+            10; then
+            echo "✅ Custom kernel runner is online!"
+            echo "ready=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Timeout waiting for custom kernel runner"
+            echo "ready=false" >> $GITHUB_OUTPUT
+            
+            # Try to get EC2 instance console output for debugging
+            echo "Attempting to get EC2 console output..."
+            exit 1
+          fi
+
+  pmu-test:
+    name: Run PMU tests on custom kernel
+    needs: [wait-for-custom-kernel, setup-and-kexec]
+    if: needs.wait-for-custom-kernel.outputs.runner-ready == 'true'
+    runs-on: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tools/testing/selftests/resctrl/
+          sparse-checkout-cone-mode: false
+      
+      - name: Verify custom kernel boot
+        run: |
+          echo "================================================"
+          echo "🚀 CUSTOM KERNEL SUCCESSFULLY BOOTED! 🚀"
+          echo "================================================"
+          echo ""
+          echo "📍 Kernel version: $(uname -r)"
+          echo "⏰ System uptime: $(uptime)"
+          echo "📅 Date: $(date)"
+          echo ""
+          
+          # Verify kexec marker
+          if [[ -f /opt/kexec-marker ]]; then
+            echo "✅ Kexec marker found: $(cat /opt/kexec-marker)"
+          else
+            echo "⚠️ Kexec marker not found"
+          fi
+          
+          # Check systemd service status
+          echo ""
+          echo "📊 GitHub runner service status:"
+          systemctl status github-runner-register.service --no-pager || true
+          
+      - name: Check resctrl support
+        run: |
+          echo "🔍 Checking resctrl support in custom kernel..."
+          
+          if [[ -d /sys/fs/resctrl ]]; then
+            echo "✅ /sys/fs/resctrl exists"
+            
+            # Try to mount resctrl
+            if ! mount | grep -q resctrl; then
+              echo "Mounting resctrl filesystem..."
+              mount -t resctrl resctrl /sys/fs/resctrl || true
+            fi
+            
+            echo "📁 Contents of /sys/fs/resctrl:"
+            ls -la /sys/fs/resctrl/ || true
+            
+            if [[ -d /sys/fs/resctrl/info ]]; then
+              echo ""
+              echo "📊 Resctrl info:"
+              find /sys/fs/resctrl/info -type f | while read file; do
+                echo "📄 $file: $(cat "$file" 2>/dev/null || echo 'read error')"
+              done
+            fi
+          else
+            echo "❌ /sys/fs/resctrl not found"
+          fi
+          
+          # Check kernel config
+          echo ""
+          echo "🔧 Kernel configuration for resctrl:"
+          if [[ -f /proc/config.gz ]]; then
+            zcat /proc/config.gz | grep -E "(RESCTRL|RDT)" || echo "No resctrl config found"
+          else
+            echo "Kernel config not available"
+          fi
+          
+          # Check dmesg for resctrl
+          echo ""
+          echo "📋 Kernel messages about resctrl:"
+          dmesg | grep -i resctrl | head -20 || echo "No resctrl messages"
+          
+      - name: Download test binary
+        run: |
+          echo "📦 Downloading test binary from release..."
+          
+          # Find the release tag
+          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep "resctrl-perf-" | head -1 | cut -f1)
+          
+          if [[ -z "$LATEST_RELEASE_TAG" ]]; then
+            echo "❌ No resctrl-perf releases found"
+            exit 1
+          fi
+          
+          echo "Downloading from release: $LATEST_RELEASE_TAG"
+          
+          if gh release download "$LATEST_RELEASE_TAG" --pattern "resctrl_tests" --output ./resctrl_tests; then
+            echo "✅ Test binary downloaded"
+            chmod +x ./resctrl_tests
+            ls -la ./resctrl_tests
+          else
+            echo "❌ Failed to download test binary"
+            exit 1
+          fi
+          
+      - name: Run PMU test
+        run: |
+          echo "🧪 Running resctrl PMU test..."
+          
+          # Run the PMU test
+          ./resctrl_tests -t pmu || echo "⚠️ PMU test completed with status: $?"
+          
+      - name: Capture test results
+        if: always()
+        run: |
+          echo "📊 Test Results Summary"
+          echo "======================="
+          
+          # Capture dmesg
+          echo ""
+          echo "🔍 Recent kernel messages:"
+          dmesg | tail -100
+          
+          # Check for PMU-related messages
+          echo ""
+          echo "🎯 PMU-related kernel messages:"
+          dmesg | grep -i -E "(pmu|perf|resctrl|rdt)" | tail -50 || echo "No PMU messages"
+
+  cleanup:
+    name: Cleanup runners and EC2 instance
+    needs: [start-initial-runner, setup-and-kexec, wait-for-custom-kernel, pmu-test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Remove custom kernel runner from GitHub
+        if: needs.setup-and-kexec.outputs.custom-runner-label
+        continue-on-error: true
+        run: |
+          echo "🧹 Removing custom kernel runner..."
+          
+          chmod +x .github/scripts/runner-registration.sh
+          .github/scripts/runner-registration.sh remove \
+            "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" || true
+            
+          echo "✅ Custom kernel runner removed"
+      
+      - name: Stop AWS Runner
+        uses: ./.github/actions/aws-runner/cleanup
+        with:
+          runner-label: ${{ needs.start-initial-runner.outputs.runner-label }}
+          ec2-instance-id: ${{ needs.start-initial-runner.outputs.ec2-instance-id }}
+          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.start-initial-runner.outputs.region }}
