@@ -253,16 +253,12 @@ jobs:
           KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
           echo "Kernel version: ${KERNEL_VERSION}"
           
-          # Build and install kernel modules using the same approach as build-initrd.sh
+          # Install already-built kernel modules to staging directory
           MODULES_STAGING="$HOME/kernel-modules-staging"
-          echo "Building and installing modules to staging directory..."
+          echo "Installing already-built modules to staging directory..."
           echo "Target directory: ${MODULES_STAGING}"
           
-          # Build modules first (may be redundant but ensures consistency)
-          NPROC=$(nproc)
-          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j${NPROC} modules
-          
-          # Then install them - this needs to be done in the same context
+          # Install the modules that were built in the previous step
           KBUILD_BUILD_TIMESTAMP='' make INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
           
           # Verify modules directory
