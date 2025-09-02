@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/seq_file.h>
+#include <linux/cpu.h>
 #include "internal.h"
 
 /*
@@ -137,9 +138,13 @@ static int resctrl_event_init(struct perf_event *event)
 	mutex_unlock(&rdtgroup_mutex);
 	fput(file);
 
+	/* Lock CPUs for the critical section of CPU mask operations */
+	cpus_read_lock();
+
 	/* Setup RMID read structure and get valid CPU mask */
 	ret = mon_event_read_setup(&rr, &cpumask, md, rdtgrp);
 	if (ret) {
+		cpus_read_unlock();
 		rdtgroup_put(rdtgrp);
 		return ret;
 	}
@@ -147,9 +152,12 @@ static int resctrl_event_init(struct perf_event *event)
 	/* Validate that the requested CPU is in the valid CPU mask for this monitoring file */
 	if (!cpumask_test_cpu(event->cpu, cpumask)) {
 		ret = -EINVAL;
+		cpus_read_unlock();
 		rdtgroup_put(rdtgrp);
 		return ret;
 	}
+
+	cpus_read_unlock();
 
 	/* Allocate our private event data */
 	resctrl_event = kzalloc(sizeof(*resctrl_event), GFP_KERNEL);
