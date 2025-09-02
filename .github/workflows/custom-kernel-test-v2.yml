@@ -58,7 +58,9 @@ jobs:
           
           # Find the latest GitHub release matching the resctrl-perf pattern
           echo "Finding latest GitHub release..."
-          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep -E "resctrl-perf-|Resctrl PMU" | head -1 | cut -f1)
+          # The release list format is: TITLE<tab>LABEL<tab>TAG<tab>DATE
+          # We need the TAG (3rd column), not the TITLE (1st column)
+          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep -E "resctrl-perf-|Resctrl PMU" | head -1 | cut -f3)
           
           if [[ -z "$LATEST_RELEASE_TAG" ]]; then
             echo "❌ No resctrl-perf releases found in repository"
@@ -422,8 +424,8 @@ jobs:
         run: |
           echo "📦 Downloading test binary from release..."
           
-          # Find the release tag
-          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep -E "resctrl-perf-|Resctrl PMU" | head -1 | cut -f1)
+          # Find the release tag (3rd column in the release list output)
+          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep -E "resctrl-perf-|Resctrl PMU" | head -1 | cut -f3)
           
           if [[ -z "$LATEST_RELEASE_TAG" ]]; then
             echo "❌ No resctrl-perf releases found"
