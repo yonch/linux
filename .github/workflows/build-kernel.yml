@@ -178,7 +178,7 @@ jobs:
               exit 1
             fi
             # Resolve any missing dependencies
-            make CC="ccache gcc" olddefconfig
+            KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
           fi
 
           # Apply build optimizations
@@ -210,11 +210,11 @@ jobs:
           scripts/config --enable CONFIG_MODULE_UNLOAD
           
           # Apply final configuration resolution
-          make CC="ccache gcc" olddefconfig
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
           
           # Show final configuration summary
           echo "📋 Final kernel configuration:"
-          echo "  - Kernel version: $(make CC=\"ccache gcc\" kernelrelease)"
+          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
           echo "  - Modules enabled: $(grep -c "=m$" .config || echo 0)"
           echo "  - Built-in features: $(grep -c "=y$" .config || echo 0)"
           echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" .config || echo 0)"
@@ -228,7 +228,7 @@ jobs:
           START_TIME=$(date +%s)
           
           # Build with optimal parallelism (cores + 1)
-          make CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
           
           # Calculate build time
           END_TIME=$(date +%s)
@@ -244,7 +244,7 @@ jobs:
           echo "🔧 Building kernel modules..."
           START_TIME=$(date +%s)
           
-          make CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
           
           END_TIME=$(date +%s)
           MODULE_TIME=$((END_TIME - START_TIME))
@@ -292,7 +292,7 @@ jobs:
           Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Debug Features: ${{ inputs.enable-debug || 'false' }}
           
-          Kernel Version: $(make CC=\"ccache gcc\" kernelrelease)
+          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)
           Compiler: $(gcc --version | head -1)
           
           Configuration Stats:
@@ -335,7 +335,7 @@ jobs:
           echo ""
           echo "🎯 KERNEL BUILD COMPLETED SUCCESSFULLY!"
           echo "======================================"
-          echo "✅ Kernel version: $(make CC=\"ccache gcc\" kernelrelease)"
+          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
           echo "✅ Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "✅ Artifacts uploaded with 14-day retention"
           echo ""
