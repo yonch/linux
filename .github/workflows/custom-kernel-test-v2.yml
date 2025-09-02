@@ -27,7 +27,7 @@ jobs:
     name: Setup and kexec into custom kernel
     runs-on: ${{ needs.start-initial-runner.outputs.runner-label }}
     needs: [start-initial-runner]
-    timeout-minutes: 15
+    timeout-minutes: 2
     outputs:
       custom-runner-label: ${{ steps.prepare-kexec.outputs.custom-runner-label }}
       kexec-status: ${{ steps.execute-kexec.outputs.status }}
@@ -250,24 +250,28 @@ jobs:
           # Sync and prepare for kexec
           echo "Syncing filesystems..."
           sync
-          sleep 2
           
           # Create a marker file to verify kexec happened
           echo "${{ github.run_id }}" > /opt/kexec-marker
           
-          echo "status=kexec-ready" >> $GITHUB_OUTPUT
+          echo "status=kexec-initiated" >> $GITHUB_OUTPUT
           
-          echo "🚀 Executing kexec in 5 seconds..."
-          echo "The runner will restart with the custom kernel."
-          sleep 5
+          echo "🚀 Initiating kexec in background..."
+          echo "The runner will restart with the custom kernel in 5 seconds."
           
-          # Note: This will terminate the runner connection
-          kexec -e || true
+          # Run kexec in background with delay, disown it so the job can complete
+          (
+            sleep 5
+            echo "Executing kexec now..." >> /var/log/kexec-setup.log
+            kexec -e >> /var/log/kexec-setup.log 2>&1
+          ) &
+          disown
           
-          # If we get here, kexec failed
-          echo "❌ Kexec failed to execute"
-          echo "status=kexec-failed" >> $GITHUB_OUTPUT
-          exit 1
+          echo "✅ Kexec initiated in background. Job completing..."
+          echo "The system will reboot into the custom kernel momentarily."
+          
+          # Give a moment for the background job to start
+          sleep 1
 
   start-initial-runner:
     name: Start initial EC2 runner
