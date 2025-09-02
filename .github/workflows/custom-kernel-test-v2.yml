@@ -259,19 +259,14 @@ jobs:
           echo "🚀 Initiating kexec in background..."
           echo "The runner will restart with the custom kernel in 5 seconds."
           
-          # Run kexec in background with delay, disown it so the job can complete
-          (
-            sleep 5
-            echo "Executing kexec now..." >> /var/log/kexec-setup.log
-            kexec -e >> /var/log/kexec-setup.log 2>&1
-          ) &
-          disown
+          # Run kexec in background with nohup to fully detach from the session
+          nohup bash -c 'sleep 5 && echo "Executing kexec now..." >> /var/log/kexec-setup.log && kexec -e >> /var/log/kexec-setup.log 2>&1' </dev/null >/dev/null 2>&1 &
           
           echo "✅ Kexec initiated in background. Job completing..."
           echo "The system will reboot into the custom kernel momentarily."
           
-          # Give a moment for the background job to start
-          sleep 1
+          # Exit immediately to complete the job
+          exit 0
 
   start-initial-runner:
     name: Start initial EC2 runner
