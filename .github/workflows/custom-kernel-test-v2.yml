@@ -51,11 +51,10 @@ jobs:
           
       - name: Download kernel artifacts from GitHub release
         id: download-kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "📦 Downloading kernel artifacts from GitHub release..."
-          
-          # Configure GitHub CLI authentication
-          echo "${{ github.token }}" | gh auth login --with-token
           
           # Find the latest GitHub release matching the resctrl-perf pattern
           echo "Finding latest GitHub release..."
@@ -418,6 +417,8 @@ jobs:
           dmesg | grep -i resctrl | head -20 || echo "No resctrl messages"
           
       - name: Download test binary
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "📦 Downloading test binary from release..."
           
