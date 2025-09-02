@@ -401,8 +401,8 @@ jobs:
           echo "Runner label: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}"
           
           # Wait for kexec to complete (scheduled for 15 seconds)
-          echo "Waiting 30 seconds for kexec to complete..."
-          sleep 30
+          echo "Waiting 2 minutes for kexec to complete and runner to boot..."
+          sleep 120
           
           # Now wait for the runner to register and come online
           chmod +x .github/scripts/runner-registration.sh
