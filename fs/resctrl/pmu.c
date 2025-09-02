@@ -79,6 +79,10 @@ static int resctrl_event_init(struct perf_event *event)
 	int fd;
 	int ret;
 
+	/* Require that a specific CPU is specified for monitoring */
+	if (event->cpu < 0)
+		return -EINVAL;
+
 	/* Extract file descriptor from config */
 	fd = (int)event->attr.config;
 	if (fd < 0)
@@ -136,13 +140,6 @@ static int resctrl_event_init(struct perf_event *event)
 	/* Setup RMID read structure and get valid CPU mask */
 	ret = mon_event_read_setup(&rr, &cpumask, md, rdtgrp);
 	if (ret) {
-		rdtgroup_put(rdtgrp);
-		return ret;
-	}
-
-	/* Require that a specific CPU is specified for monitoring */
-	if (event->cpu < 0) {
-		ret = -EINVAL;
 		rdtgroup_put(rdtgrp);
 		return ret;
 	}
