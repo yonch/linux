@@ -293,7 +293,6 @@ jobs:
           instance-type: ${{ inputs.instance-type || 'm7i.xlarge' }}
           image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
           volume-size: '20'
-          runner-home-dir: '/home/runner'
           packages: '["kexec-tools", "curl", "jq", "gh"]'
 
   wait-for-custom-kernel:
