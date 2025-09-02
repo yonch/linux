@@ -88,3 +88,108 @@ Summary
 -------
 
 Understanding these perf subsystem internals is crucial when adding new PMU support to the kernel. We covered the major inputs to `perf_event_open`, the data structures associated with perf events, and how users specify their PMU functionality. Hope this serves as useful background when interacting with the code!
+
+----
+# Testing with GitHub Actions
+
+Overview of Available Workflows
+-------------------------------
+
+We have three GitHub Actions workflows for kernel development and testing:
+
+1. **`extract-kernel-config.yml`** - Extracts kernel configuration from Ubuntu AMIs running on specific EC2 instance types. This workflow creates a `localmodconfig` that dramatically reduces build times by including only modules needed for the target hardware (typically reducing from ~7000 modules to ~200, a 35x reduction).
+
+2. **`build-kernel.yml`** - Builds the Linux kernel using the extracted localmodconfig for fast compilation. Produces kernel binaries (bzImage, vmlinux), initrd, and creates GitHub releases with all artifacts. Uses ccache for incremental builds and various optimizations.
+
+3. **`custom-kernel-test.yml`** - Deploys and tests the custom kernel on an EC2 instance using kexec. Tests resctrl PMU functionality and captures detailed logs for verification.
+
+Pushing to Master Branch
+------------------------
+
+**IMPORTANT**: GitHub Actions workflows only trigger from commits on the `master` branch, not feature branches. Since we develop on the `resctrl-perf` branch, you must push changes to master before testing:
+
+```bash
+# Push current HEAD to master branch (required for workflows to run)
+git push origin HEAD:master
+```
+
+Triggering and Monitoring Workflows
+-----------------------------------
+
+All workflows use `workflow_dispatch` (manual triggers). Use the GitHub CLI to trigger and monitor them:
+
+```bash
+# 1. Extract config (run once per instance type/image combination)
+gh workflow run extract-kernel-config.yml \
+  --field instance-type=m7i.metal-24xl \
+  --field image-type=ubuntu-24.04
+
+# 2. Build kernel (uses config from step 1)  
+gh workflow run build-kernel.yml \
+  --field instance-type=m7i.metal-24xl \
+  --field image-type=ubuntu-24.04 \
+  --field build-type=localmod
+
+# 3. Test kernel (uses latest GitHub release)
+gh workflow run custom-kernel-test.yml \
+  --field build-id=$(git rev-parse HEAD) \
+  --field instance-type=m7i.xlarge \
+  --field image-type=ubuntu-24.04
+```
+
+**Handling Timeout Issues**: The default bash timeout is 2 minutes. For long-running workflows, monitor progress with:
+
+```bash
+# Watch workflow progress (re-run every 2 minutes if it times out)
+gh run watch
+
+# Alternative: Check run status periodically
+gh run list --limit 5
+gh run view <run-id>
+```
+
+If `gh run watch` times out due to the 2-minute limit, simply run it again to continue monitoring.
+
+Verifying Results and Examining Logs
+------------------------------------
+
+**Critical**: Don't just check if workflows succeeded - examine the logs for all steps to catch subtle issues:
+
+```bash
+# View recent runs and their status
+gh run list --limit 10
+
+# View detailed logs for a specific run
+gh run view <run-id> --log
+
+# View logs for a specific job within a run
+gh run view <run-id> --job=<job-name> --log
+```
+
+Example Workflow Sequence
+-------------------------
+
+Complete testing workflow:
+
+```bash
+# 1. Push changes to master 
+git push origin HEAD:master
+
+# 2. Extract config (if not done for this instance type)
+gh workflow run extract-kernel-config.yml --field instance-type=m7i.metal-24xl
+gh run watch  # Monitor until complete
+
+# 3. Build kernel with extracted config
+gh workflow run build-kernel.yml --field build-type=localmod  
+gh run watch  # Monitor build progress
+
+# 4. Test the built kernel
+gh workflow run custom-kernel-test.yml --field build-id=$(git rev-parse HEAD)
+gh run watch  # Monitor test execution
+
+# 5. Examine detailed results
+gh run list --limit 3
+gh run view <test-run-id> --log | grep -A5 -B5 "PMU\|resctrl\|ERROR\|WARNING"
+```
+
+This testing approach ensures comprehensive verification of kernel changes through the full build-deploy-test pipeline.
