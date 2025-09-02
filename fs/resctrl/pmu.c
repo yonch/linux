@@ -193,13 +193,41 @@ out_fput:
 	return ret;
 }
 
+/*
+ * Read current counter value
+ */
+static void resctrl_event_update(struct perf_event *event)
+{
+	/* Currently just a stub - would read actual cache occupancy here */
+	local64_set(&event->hw.prev_count, 0);
+}
+
+/*
+ * Start event counting
+ */
+static void resctrl_event_start(struct perf_event *event, int flags)
+{
+	/* Save current counter value as the starting point */
+	resctrl_event_update(event);
+}
+
+/*
+ * Stop event counting
+ */
+static void resctrl_event_stop(struct perf_event *event, int flags)
+{
+	if (flags & PERF_EF_UPDATE)
+		resctrl_event_update(event);
+}
 
 /*
  * Add event to PMU (enable monitoring)
  */
 static int resctrl_event_add(struct perf_event *event, int flags)
 {
-	/* Currently just a stub - would setup actual monitoring here */
+	if (flags & PERF_EF_START)
+		resctrl_event_start(event, flags);
+
 	return 0;
 }
 
@@ -208,32 +236,7 @@ static int resctrl_event_add(struct perf_event *event, int flags)
  */
 static void resctrl_event_del(struct perf_event *event, int flags)
 {
-	/* Currently just a stub - would disable monitoring here */
-}
-
-/*
- * Start event counting
- */
-static void resctrl_event_start(struct perf_event *event, int flags)
-{
-	/* Currently just a stub - would start monitoring here */
-}
-
-/*
- * Stop event counting
- */
-static void resctrl_event_stop(struct perf_event *event, int flags)
-{
-	/* Currently just a stub - would stop monitoring here */
-}
-
-/*
- * Read current counter value
- */
-static void resctrl_event_update(struct perf_event *event)
-{
-	/* Currently just a stub - would read actual cache occupancy here */
-	local64_set(&event->hw.prev_count, 0);
+	resctrl_event_stop(event, PERF_EF_UPDATE);
 }
 
 /*
