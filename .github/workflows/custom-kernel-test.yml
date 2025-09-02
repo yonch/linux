@@ -311,25 +311,37 @@ jobs:
           
           echo "✅ Kernel loaded successfully"
           
-          # Sync and prepare for kexec
-          echo "Syncing filesystems..."
-          sync
-          
           # Create a marker file to verify kexec happened
           echo "${{ github.run_id }}" > /opt/kexec-marker
           
+          # Create a systemd service to perform kexec
+          cat > /etc/systemd/system/perform-kexec.service << 'EOF'
+          [Unit]
+          Description=Perform kexec to custom kernel
+          DefaultDependencies=no
+          After=basic.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'sleep 10 && echo "Executing kexec now..." >> /var/log/kexec-setup.log && sync && kexec -e'
+          StandardOutput=journal+console
+          StandardError=journal+console
+          EOF
+          
+          # Start the kexec service (it will run independently of this job)
+          echo "🚀 Starting kexec service..."
+          systemctl daemon-reload
+          systemctl start perform-kexec.service &
+          
           echo "status=kexec-initiated" >> $GITHUB_OUTPUT
           
-          echo "🚀 Initiating kexec in background..."
-          echo "The runner will restart with the custom kernel in 5 seconds."
+          echo "✅ Kexec service started. The system will reboot into the custom kernel in 10 seconds."
+          echo "Job completing now to allow kexec to proceed..."
           
-          # Run kexec in background with nohup to fully detach from the session
-          nohup bash -c 'sleep 5 && echo "Executing kexec now..." >> /var/log/kexec-setup.log && kexec -e >> /var/log/kexec-setup.log 2>&1' </dev/null >/dev/null 2>&1 &
+          # Give systemd time to start the service
+          sleep 2
           
-          echo "✅ Kexec initiated in background. Job completing..."
-          echo "The system will reboot into the custom kernel momentarily."
-          
-          # Exit immediately to complete the job
+          # Exit to complete the job
           exit 0
 
   start-initial-runner:
