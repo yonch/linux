@@ -108,12 +108,35 @@ jobs:
           ccache -s
           ccache -z  # Zero stats for this build
 
+      - name: Find latest extract workflow run
+        if: inputs.build-type == 'localmod' || !inputs.build-type
+        id: find-extract-run
+        run: |
+          echo "🔍 Finding latest extract workflow run with localmodconfig for ${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}..."
+          
+          # Get the latest successful extract workflow run that has our specific artifact
+          EXTRACT_RUN_ID=$(gh api repos/yonch/linux/actions/workflows/extract-kernel-config.yml/runs \
+            --jq '.workflow_runs[] | select(.status == "completed" and .conclusion == "success") | .id' \
+            | head -1)
+          
+          if [ -z "$EXTRACT_RUN_ID" ]; then
+            echo "❌ No successful extract workflow runs found"
+            echo "Please run the extract-kernel-config workflow first to generate localmodconfig"
+            exit 1
+          fi
+          
+          echo "✅ Found extract workflow run: $EXTRACT_RUN_ID"
+          echo "extract_run_id=$EXTRACT_RUN_ID" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Download localmodconfig artifact
         if: inputs.build-type == 'localmod' || !inputs.build-type
         uses: actions/download-artifact@v4
         with:
           name: localmod-config-${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}
           path: ./localmod-artifacts/
+          run-id: ${{ steps.find-extract-run.outputs.extract_run_id }}
         
       - name: Extract and prepare localmodconfig
         if: inputs.build-type == 'localmod' || !inputs.build-type
