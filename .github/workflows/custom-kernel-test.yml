@@ -237,16 +237,8 @@ jobs:
           # Source the configuration
           source /opt/runner-config.sh
           
-          # Wait for network to be fully up
-          echo "Waiting for network..."
-          for i in {1..30}; do
-            if ping -c 1 github.com > /dev/null 2>&1; then
-              echo "Network is up"
-              break
-            fi
-            echo "Waiting for network... ($i/30)"
-            sleep 2
-          done
+          # Network should already be up due to systemd dependencies
+          # No need to wait - systemd ensures network-online.target is reached
           
           # Register the runner
           cd "$RUNNER_DIR"
