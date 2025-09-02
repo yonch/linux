@@ -67,10 +67,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: kernel-build-${{ inputs.build-type || 'localmod' }}-${{ github.sha }}
-          restore-keys: |
-            kernel-build-${{ inputs.build-type || 'localmod' }}-
-            kernel-build-
+          key: kernel-build-${{ inputs.build-type || 'localmod' }}
           max-size: 8G
           verbose: 2
 
