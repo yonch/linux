@@ -50,60 +50,71 @@ jobs:
           image-type: ${{ inputs.image-type || 'ubuntu-22.04' }}
           volume-size: '20'
           runner-home-dir: '/tmp'
-          packages: '["kexec-tools", "curl", "unzip", "jq"]'
+          packages: '["kexec-tools", "curl", "unzip", "jq", "gh"]'
           pre-runner-script: |
             # Custom Kernel Kexec Setup
             # =========================
-            # Download our custom built kernel from S3 and kexec into it
+            # Download our custom built kernel from GitHub releases and kexec into it
             
             echo "Setting up custom kernel kexec..." | tee -a /var/log/kexec-setup.log
 
             # Get kernel artifacts info from workflow input
             BUILD_ID="${{ inputs.build-id }}"
-            S3_BUCKET="unvariance-kernel-dev"
-            S3_REGION="us-east-2"
-            METADATA_S3_KEY="kernels/${BUILD_ID}/metadata.json"
+            REPO_OWNER="${{ github.repository_owner }}"
+            REPO_NAME="${{ github.event.repository.name }}"
 
             echo "Build ID: $BUILD_ID" | tee -a /var/log/kexec-setup.log
-            echo "Metadata S3 key: $METADATA_S3_KEY" | tee -a /var/log/kexec-setup.log
+            echo "Repository: $REPO_OWNER/$REPO_NAME" | tee -a /var/log/kexec-setup.log
 
-            # Install AWS CLI
-            echo "Installing AWS CLI" | tee -a /var/log/kexec-setup.log
+            # Configure GitHub CLI authentication using the workflow token
+            echo "Configuring GitHub CLI authentication..." | tee -a /var/log/kexec-setup.log
+            echo "${{ github.token }}" | gh auth login --with-token
+            
+            # Find the latest GitHub release matching the resctrl-perf pattern
+            echo "Finding latest GitHub release..." | tee -a /var/log/kexec-setup.log
             cd /tmp
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip awscliv2.zip 2>&1 > /dev/null
-            sudo ./aws/install 2>&1 > /dev/null
-
-            # Download and parse metadata JSON to get kernel and initrd paths
-            echo "Downloading metadata.json from S3..." | tee -a /var/log/kexec-setup.log
-            aws s3 cp "s3://${S3_BUCKET}/${METADATA_S3_KEY}" /tmp/metadata.json --region "$S3_REGION" --no-progress
             
-            if [[ ! -f /tmp/metadata.json ]]; then
-                echo "Failed to download metadata.json" | tee -a /var/log/kexec-setup.log
+            # Get the latest release with resctrl-perf tag
+            LATEST_RELEASE_TAG=$(gh release list --repo "$REPO_OWNER/$REPO_NAME" --limit 50 | grep "resctrl-perf-" | head -1 | cut -f1)
+            
+            if [[ -z "$LATEST_RELEASE_TAG" ]]; then
+                echo "❌ No resctrl-perf releases found in repository" | tee -a /var/log/kexec-setup.log
+                echo "Available releases:" | tee -a /var/log/kexec-setup.log
+                gh release list --repo "$REPO_OWNER/$REPO_NAME" --limit 10 | tee -a /var/log/kexec-setup.log
                 exit 1
             fi
             
-            echo "Contents of metadata.json:" | tee -a /var/log/kexec-setup.log
-            cat /tmp/metadata.json | tee -a /var/log/kexec-setup.log
+            echo "Latest release found: $LATEST_RELEASE_TAG" | tee -a /var/log/kexec-setup.log
             
-            # Extract kernel and initrd paths from metadata
-            KERNEL_S3_KEY=$(jq -r '.kernel_path // "kernels/'${BUILD_ID}'/bzImage"' /tmp/metadata.json)
-            INITRD_S3_KEY=$(jq -r '.initrd_path // "kernels/'${BUILD_ID}'/initrd.img"' /tmp/metadata.json)
+            # Download kernel artifacts from the GitHub release
+            echo "Downloading kernel artifacts from GitHub release $LATEST_RELEASE_TAG..." | tee -a /var/log/kexec-setup.log
             
-            echo "Kernel S3 key from metadata: $KERNEL_S3_KEY" | tee -a /var/log/kexec-setup.log
-            echo "Initrd S3 key from metadata: $INITRD_S3_KEY" | tee -a /var/log/kexec-setup.log
+            # Download bzImage (kernel)
+            if gh release download "$LATEST_RELEASE_TAG" --repo "$REPO_OWNER/$REPO_NAME" --pattern "bzImage" --output /tmp/custom-bzImage; then
+                echo "✅ bzImage downloaded successfully" | tee -a /var/log/kexec-setup.log
+            else
+                echo "❌ Failed to download bzImage from release" | tee -a /var/log/kexec-setup.log
+                exit 1
+            fi
             
-            # Download custom kernel artifacts from S3
-            echo "Downloading custom kernel from S3..." | tee -a /var/log/kexec-setup.log
-            aws s3 cp "s3://${S3_BUCKET}/${KERNEL_S3_KEY}" /tmp/custom-bzImage --region "$S3_REGION" --no-progress
-            aws s3 cp "s3://${S3_BUCKET}/${INITRD_S3_KEY}" /tmp/custom-initrd.img --region "$S3_REGION" --no-progress
+            # Download initrd
+            if gh release download "$LATEST_RELEASE_TAG" --repo "$REPO_OWNER/$REPO_NAME" --pattern "initrd.img" --output /tmp/custom-initrd.img; then
+                echo "✅ initrd.img downloaded successfully" | tee -a /var/log/kexec-setup.log
+            else
+                echo "❌ Failed to download initrd.img from release" | tee -a /var/log/kexec-setup.log
+                exit 1
+            fi
             
+            # Verify downloads
             if [[ ! -f /tmp/custom-bzImage ]] || [[ ! -f /tmp/custom-initrd.img ]]; then
-                echo "Failed to download custom kernel artifacts" | tee -a /var/log/kexec-setup.log
+                echo "❌ Failed to download custom kernel artifacts from GitHub release" | tee -a /var/log/kexec-setup.log
+                echo "Files found:" | tee -a /var/log/kexec-setup.log
+                ls -la /tmp/custom-* | tee -a /var/log/kexec-setup.log
                 exit 1
             fi
             
-            echo "Custom kernel artifacts downloaded successfully" | tee -a /var/log/kexec-setup.log
+            echo "✅ Custom kernel artifacts downloaded successfully from GitHub release" | tee -a /var/log/kexec-setup.log
+            echo "📋 Downloaded files:" | tee -a /var/log/kexec-setup.log
             ls -la /tmp/custom-* | tee -a /var/log/kexec-setup.log
 
             # Create persistent directory and download the GitHub Actions runner
@@ -495,23 +506,40 @@ jobs:
             echo "❌ Memory Bandwidth Allocation not found"
           fi
           
-      - name: Download test binary from S3
+      - name: Download test binary from GitHub release
         run: |
-          echo "📦 Downloading pre-compiled test binary from S3..."
-          BUILD_ID="${{ inputs.build-id }}"
-          S3_BUCKET="unvariance-kernel-dev"
-          S3_REGION="us-east-2"
-          TEST_S3_KEY="kernels/${BUILD_ID}/resctrl_tests"
+          echo "📦 Downloading pre-compiled test binary from GitHub release..."
           
-          aws s3 cp "s3://${S3_BUCKET}/${TEST_S3_KEY}" ./resctrl_tests --region "$S3_REGION" --no-progress
-          chmod +x ./resctrl_tests
+          # Find the latest GitHub release matching the resctrl-perf pattern
+          echo "Finding latest GitHub release..."
+          LATEST_RELEASE_TAG=$(gh release list --limit 50 | grep "resctrl-perf-" | head -1 | cut -f1)
           
-          if [[ ! -f ./resctrl_tests ]]; then
-            echo "❌ Failed to download test binary"
+          if [[ -z "$LATEST_RELEASE_TAG" ]]; then
+            echo "❌ No resctrl-perf releases found in repository"
+            echo "Available releases:"
+            gh release list --limit 10
             exit 1
           fi
           
-          echo "✅ Test binary downloaded successfully"
+          echo "Latest release found: $LATEST_RELEASE_TAG"
+          
+          # Download resctrl_tests binary from the GitHub release
+          if gh release download "$LATEST_RELEASE_TAG" --pattern "resctrl_tests" --output ./resctrl_tests; then
+            echo "✅ resctrl_tests downloaded successfully"
+            chmod +x ./resctrl_tests
+          else
+            echo "❌ Failed to download resctrl_tests from release"
+            echo "Available assets in release:"
+            gh release view "$LATEST_RELEASE_TAG" --json assets --jq '.assets[].name'
+            exit 1
+          fi
+          
+          if [[ ! -f ./resctrl_tests ]]; then
+            echo "❌ Test binary not found after download"
+            exit 1
+          fi
+          
+          echo "✅ Test binary downloaded successfully from GitHub release"
           ls -la ./resctrl_tests
           
       - name: Run PMU test
