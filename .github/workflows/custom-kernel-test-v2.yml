@@ -55,7 +55,7 @@ jobs:
           echo "📦 Downloading kernel artifacts from GitHub release..."
           
           # Configure GitHub CLI authentication
-          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+          echo "${{ github.token }}" | gh auth login --with-token
           
           # Find the latest GitHub release matching the resctrl-perf pattern
           echo "Finding latest GitHub release..."
@@ -120,7 +120,7 @@ jobs:
           # Get registration token for the new runner
           echo "Getting registration token..."
           chmod +x .github/scripts/runner-registration.sh
-          REGISTRATION_TOKEN=$(.github/scripts/runner-registration.sh get-token "${{ secrets.GITHUB_TOKEN }}")
+          REGISTRATION_TOKEN=$(.github/scripts/runner-registration.sh get-token "${{ secrets.REPO_ADMIN_TOKEN }}")
           
           if [[ -z "$REGISTRATION_TOKEN" ]]; then
             echo "❌ Failed to get registration token"
@@ -325,7 +325,7 @@ jobs:
           chmod +x .github/scripts/runner-registration.sh
           
           if .github/scripts/runner-registration.sh wait \
-            "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ secrets.REPO_ADMIN_TOKEN }}" \
             "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" \
             300 \
             10; then
@@ -485,7 +485,7 @@ jobs:
           
           chmod +x .github/scripts/runner-registration.sh
           .github/scripts/runner-registration.sh remove \
-            "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ secrets.REPO_ADMIN_TOKEN }}" \
             "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" || true
             
           echo "✅ Custom kernel runner removed"
