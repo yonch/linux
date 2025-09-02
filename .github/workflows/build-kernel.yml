@@ -243,26 +243,36 @@ jobs:
           # Create artifacts directory early if it doesn't exist
           mkdir -p artifacts
           
-          # Install kernel modules to a staging directory
+          # Get kernel version first
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          echo "Kernel version: ${KERNEL_VERSION}"
+          
+          # Build and install kernel modules using the same approach as build-initrd.sh
           MODULES_STAGING="$HOME/kernel-modules-staging"
-          echo "Installing modules to staging directory..."
+          echo "Building and installing modules to staging directory..."
+          echo "Target directory: ${MODULES_STAGING}"
+          
+          # Build modules first (may be redundant but ensures consistency)
+          NPROC=$(nproc)
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j${NPROC} modules
+          
+          # Then install them - this needs to be done in the same context
           KBUILD_BUILD_TIMESTAMP='' make INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
           
-          # Get kernel version
-          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          # Verify modules directory
           MODULES_DIR="${MODULES_STAGING}/lib/modules/${KERNEL_VERSION}"
-          
-          echo "Kernel version: ${KERNEL_VERSION}"
-          echo "Modules directory: ${MODULES_DIR}"
+          echo "Expected modules directory: ${MODULES_DIR}"
           
           if [ ! -d "${MODULES_DIR}" ]; then
             echo "❌ Modules directory not found: ${MODULES_DIR}"
             echo "Available directories in ${MODULES_STAGING}:"
-            find "${MODULES_STAGING}" -type d | head -10 || echo "No directories found"
+            find "${MODULES_STAGING}" -type d 2>/dev/null | head -10 || echo "No directories found"
+            echo "Contents of ${MODULES_STAGING}:"
+            ls -la "${MODULES_STAGING}" 2>/dev/null || echo "Staging directory not found"
             exit 1
           fi
           
-          echo "Modules installed successfully:"
+          echo "✅ Modules installed successfully:"
           echo "  - Module count: $(find "${MODULES_DIR}" -name "*.ko" | wc -l)"
           echo "  - Directory size: $(du -sh "${MODULES_DIR}" | cut -f1)"
           
