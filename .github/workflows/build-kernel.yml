@@ -132,11 +132,12 @@ jobs:
 
       - name: Download localmodconfig artifact
         if: inputs.build-type == 'localmod' || !inputs.build-type
-        uses: actions/download-artifact@v4
+        uses: dawidd6/action-download-artifact@v6
         with:
           name: localmod-config-${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}
           path: ./localmod-artifacts/
-          run-id: ${{ steps.find-extract-run.outputs.extract_run_id }}
+          run_id: ${{ steps.find-extract-run.outputs.extract_run_id }}
+          github_token: ${{ github.token }}
         
       - name: Extract and prepare localmodconfig
         if: inputs.build-type == 'localmod' || !inputs.build-type
