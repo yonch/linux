@@ -61,7 +61,7 @@ jobs:
       - name: Cache and install build dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd
+          packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd dracut-core
           version: 1.0
 
       - name: Setup ccache
@@ -239,6 +239,63 @@ jobs:
           MODULE_TIME=$((END_TIME - START_TIME))
           echo "⏰ Module build completed in ${MODULE_TIME} seconds ($((MODULE_TIME / 60))m $((MODULE_TIME % 60))s)"
 
+      - name: Build initrd with dracut
+        run: |
+          echo "🔧 Building initrd with dracut..."
+          
+          # Create artifacts directory early if it doesn't exist
+          mkdir -p artifacts
+          
+          # Install kernel modules to a staging directory
+          MODULES_STAGING="$HOME/kernel-modules-staging"
+          echo "Installing modules to staging directory..."
+          KBUILD_BUILD_TIMESTAMP='' make INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
+          
+          # Get kernel version
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          MODULES_DIR="${MODULES_STAGING}/lib/modules/${KERNEL_VERSION}"
+          
+          echo "Kernel version: ${KERNEL_VERSION}"
+          echo "Modules directory: ${MODULES_DIR}"
+          
+          if [ ! -d "${MODULES_DIR}" ]; then
+            echo "❌ Modules directory not found: ${MODULES_DIR}"
+            echo "Available directories in ${MODULES_STAGING}:"
+            find "${MODULES_STAGING}" -type d | head -10 || echo "No directories found"
+            exit 1
+          fi
+          
+          echo "Modules installed successfully:"
+          echo "  - Module count: $(find "${MODULES_DIR}" -name "*.ko" | wc -l)"
+          echo "  - Directory size: $(du -sh "${MODULES_DIR}" | cut -f1)"
+          
+          # Create initrd using dracut with cloud/AWS drivers
+          echo "Creating portable initrd with dracut..."
+          AWS_DRIVERS="ena virtio_net virtio_blk nvme ixgbevf virtio_scsi"
+          
+          echo "Including AWS/cloud drivers: ${AWS_DRIVERS}"
+          dracut --no-hostonly \
+                 --kmoddir "${MODULES_DIR}" \
+                 --add-drivers "${AWS_DRIVERS}" \
+                 --force \
+                 "artifacts/initrd.img" \
+                 "${KERNEL_VERSION}"
+          
+          if [ -f "artifacts/initrd.img" ]; then
+            echo "✅ Initrd created successfully:"
+            echo "  - Size: $(du -h artifacts/initrd.img | cut -f1)"
+            echo "  - File info: $(ls -la artifacts/initrd.img)"
+            
+            # Calculate SHA256 for verification
+            sha256sum artifacts/initrd.img > artifacts/initrd.sha256
+            echo "  - SHA256: $(cat artifacts/initrd.sha256)"
+          else
+            echo "❌ Failed to create initrd"
+            echo "Checking dracut logs and artifacts directory:"
+            ls -la artifacts/ || echo "No artifacts directory"
+            exit 1
+          fi
+
       - name: Prepare kernel artifacts
         run: |
           echo "📦 Preparing kernel artifacts..."
@@ -281,7 +338,7 @@ jobs:
           Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Debug Features: ${{ inputs.enable-debug || 'false' }}
           
-          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)
+          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
           Compiler: $(gcc --version | head -1)
           
           Configuration Stats:
@@ -353,9 +410,12 @@ jobs:
           - **bzImage**: Bootable kernel image
           - **vmlinux**: Uncompressed kernel image (for debugging)
           - **System.map**: Kernel symbol map
+          - **initrd.img**: Initial ramdisk with AWS/cloud drivers (ena, virtio, nvme, etc.)
+          - **initrd.sha256**: SHA256 checksum for initrd verification
           - **kernel-config**: Kernel configuration used for this build
           - **build-summary.txt**: Detailed build information and statistics
-          - **modules**: All kernel modules (if any were built)
+          - **resctrl_tests**: Compiled test binary for resctrl functionality
+          - **modules archive**: All kernel modules (if any were built)
           
           ## Usage
           This kernel is designed for testing resctrl PMU functionality. Download the bzImage and use it with kexec or as a bootable kernel for testing cache occupancy monitoring via perf events.
@@ -402,29 +462,20 @@ jobs:
             echo "✅ build-summary.txt uploaded"
           fi
           
-          # Create initrd using build-initrd.sh and upload it
-          echo "🔧 Building initrd for release..."
-          if [ -f "./build-initrd.sh" ]; then
-            # Build initrd locally (without S3 upload)
-            ./build-initrd.sh || echo "⚠️ initrd build failed, continuing without it"
+          # Upload initrd if it exists (should be built in previous step)
+          echo "📦 Uploading initrd from artifacts..."
+          if [ -f "artifacts/initrd.img" ]; then
+            gh release upload "$RELEASE_TAG" artifacts/initrd.img --clobber
+            echo "✅ initrd.img uploaded"
             
-            # Find the built initrd in the cache/temp directory
-            INITRD_FILE=$(find "$HOME/.kernel-initrd-tmp-"* -name "initrd.img" 2>/dev/null | head -1)
-            if [ -n "$INITRD_FILE" ] && [ -f "$INITRD_FILE" ]; then
-              gh release upload "$RELEASE_TAG" "$INITRD_FILE" --clobber
-              echo "✅ initrd.img uploaded from $INITRD_FILE"
-            else
-              echo "⚠️ initrd.img not found after build, checking alternative locations"
-              # Check if there's an output directory created
-              if [ -d "initrd-out" ] && [ -f "initrd-out/initrd.img" ]; then
-                gh release upload "$RELEASE_TAG" initrd-out/initrd.img --clobber
-                echo "✅ initrd.img uploaded from initrd-out/"
-              else
-                echo "⚠️ No initrd.img found, skipping upload"
-              fi
+            if [ -f "artifacts/initrd.sha256" ]; then
+              gh release upload "$RELEASE_TAG" artifacts/initrd.sha256 --clobber
+              echo "✅ initrd.sha256 uploaded"
             fi
           else
-            echo "⚠️ build-initrd.sh not found, skipping initrd creation"
+            echo "⚠️ No initrd.img found in artifacts directory"
+            echo "Available files in artifacts:"
+            ls -la artifacts/ || echo "No artifacts directory found"
           fi
           
           # Create modules archive if modules exist
@@ -481,7 +532,7 @@ jobs:
           echo "🚀 GitHub Release:"
           echo "  - Tag: ${{ steps.create_release.outputs.release_tag }}"
           echo "  - URL: ${{ steps.create_release.outputs.release_url }}"
-          echo "  - Assets: bzImage, vmlinux, System.map, kernel-config, build-summary.txt, initrd.img, resctrl_tests"
+          echo "  - Assets: bzImage, vmlinux, System.map, initrd.img, initrd.sha256, kernel-config, build-summary.txt, resctrl_tests, modules"
           echo ""
           echo "💡 Performance optimizations applied:"
           echo "  - ccache for fast incremental builds (6.5x speedup)"
