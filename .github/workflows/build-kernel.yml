@@ -58,22 +58,11 @@ jobs:
           # Don't need full history for builds
           fetch-depth: 1
 
-      - name: Install build dependencies
-        run: |
-          echo "📦 Installing build dependencies..."
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            bc \
-            kmod \
-            cpio \
-            flex \
-            bison \
-            libelf-dev \
-            libssl-dev \
-            dwarves \
-            zstd
+      - name: Cache and install build dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd
+          version: 1.0
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
