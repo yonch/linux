@@ -88,8 +88,61 @@ jobs:
             exit 1
           fi
           
+          # Try to download kernel modules archive
+          echo "Checking for kernel modules archive..."
+          if gh release download "$LATEST_RELEASE_TAG" --repo "${{ github.repository }}" --pattern "modules-*.tar.gz" 2>/dev/null; then
+            echo "✅ Kernel modules archive downloaded"
+            # Save modules archive path for later installation
+            MODULES_ARCHIVE=$(ls modules-*.tar.gz | head -1)
+            echo "modules-archive=/tmp/kernel/$MODULES_ARCHIVE" >> $GITHUB_OUTPUT
+            
+            # Extract kernel version from archive name
+            KERNEL_VERSION=$(echo "$MODULES_ARCHIVE" | sed 's/modules-\(.*\)\.tar\.gz/\1/')
+            echo "kernel-version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+            echo "Kernel version: $KERNEL_VERSION"
+          else
+            echo "⚠️ No kernel modules archive found (kernel may be built with all drivers built-in)"
+            echo "modules-archive=" >> $GITHUB_OUTPUT
+            echo "kernel-version=" >> $GITHUB_OUTPUT
+          fi
+          
           echo "✅ Kernel artifacts downloaded successfully"
           ls -la /tmp/kernel/
+          
+      - name: Install kernel modules if available
+        run: |
+          if [[ -n "${{ steps.download-kernel.outputs.modules-archive }}" ]]; then
+            echo "📦 Installing kernel modules..."
+            
+            MODULES_ARCHIVE="${{ steps.download-kernel.outputs.modules-archive }}"
+            KERNEL_VERSION="${{ steps.download-kernel.outputs.kernel-version }}"
+            
+            # Create modules directory
+            mkdir -p "/lib/modules/$KERNEL_VERSION"
+            
+            # Extract modules to the correct location
+            echo "Extracting modules to /lib/modules/$KERNEL_VERSION..."
+            tar -xzf "$MODULES_ARCHIVE" -C "/lib/modules/$KERNEL_VERSION" --strip-components=1
+            
+            # Generate module dependencies
+            echo "Running depmod to generate module dependencies..."
+            depmod -a "$KERNEL_VERSION"
+            
+            # Verify installation
+            MODULE_COUNT=$(find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | wc -l)
+            echo "✅ Installed $MODULE_COUNT kernel modules"
+            
+            # Show some of the installed modules
+            echo "Sample of installed modules:"
+            find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | head -10
+            
+            # Ensure NLS modules are available
+            echo ""
+            echo "Checking for NLS/charset modules:"
+            find "/lib/modules/$KERNEL_VERSION" -name "*nls*.ko" -o -name "*iso*.ko" | head -20
+          else
+            echo "⚠️ No kernel modules to install"
+          fi
           
       - name: Download and prepare GitHub runner
         run: |

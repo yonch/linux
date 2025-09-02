@@ -440,9 +440,12 @@ jobs:
           if [ "$(find artifacts -name "*.ko" 2>/dev/null | wc -l)" -gt 0 ]; then
             echo "📦 Creating modules archive..."
             cd artifacts
-            tar -czf "modules-${KERNEL_VERSION}.tar.gz" $(find . -name "*.ko" | head -100)
+            # Include ALL modules, not just first 100
+            tar -czf "modules-${KERNEL_VERSION}.tar.gz" $(find . -name "*.ko")
             cd ..
-            echo "✅ modules archive created"
+            echo "✅ modules archive created: modules-${KERNEL_VERSION}.tar.gz"
+            echo "  - Size: $(du -h artifacts/modules-${KERNEL_VERSION}.tar.gz | cut -f1)"
+            echo "  - Module count: $(find artifacts -name "*.ko" | wc -l)"
           fi
           
           # Build resctrl tests
