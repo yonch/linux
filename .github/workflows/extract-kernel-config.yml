@@ -44,13 +44,16 @@ jobs:
           instance-type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
           volume-size: '20'
-          packages: '["curl", "gzip", "tar", "build-essential", "bc", "kmod", "cpio", "flex", "bison", "libelf-dev", "libssl-dev"]'
+          packages: '["curl", "gzip", "tar", "build-essential", "bc", "kmod", "cpio", "flex", "bison", "libelf-dev", "libssl-dev", "pciutils", "usbutils"]'
 
   extract-configs:
     needs: [setup-runner]
     runs-on: ${{ needs.setup-runner.outputs.runner-label }}
     timeout-minutes: 30
     steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        
       - name: Verify system info
         run: |
           echo "================================================"
@@ -101,30 +104,31 @@ jobs:
           
           # First, make sure all currently loaded modules are identified
           echo "📋 Currently loaded modules:"
-          lsmod | wc -l
+          TOTAL_LOADED_MODULES=$(lsmod | wc -l)
+          echo "Total loaded modules: $TOTAL_LOADED_MODULES"
           echo "First 20 loaded modules:"
           lsmod | head -20
-          
-          # Get kernel source or use a minimal approach
-          # Since we can't easily get full kernel source, we'll extract the current config
-          # and create a minimal version based on loaded modules
           
           # Check if we have the running kernel's config available
           mkdir -p /tmp/localmod-config
           
           if [ -f /proc/config.gz ]; then
             echo "✅ Using /proc/config.gz as base for localmodconfig"
-            zcat /proc/config.gz > /tmp/localmod-config/current-config
+            zcat /proc/config.gz > .config
+            cp .config /tmp/localmod-config/original-config
           elif ls /boot/config-* 1> /dev/null 2>&1; then
             echo "✅ Using /boot/config-* as base for localmodconfig"
             # Use the config that matches the running kernel version if available
             KERNEL_VERSION=$(uname -r)
             if [ -f "/boot/config-${KERNEL_VERSION}" ]; then
               echo "📍 Found exact match: /boot/config-${KERNEL_VERSION}"
-              cp "/boot/config-${KERNEL_VERSION}" /tmp/localmod-config/current-config
+              cp "/boot/config-${KERNEL_VERSION}" .config
+              cp "/boot/config-${KERNEL_VERSION}" /tmp/localmod-config/original-config
             else
               echo "📍 Using most recent config from /boot"
-              cp $(ls -t /boot/config-* | head -1) /tmp/localmod-config/current-config
+              LATEST_CONFIG=$(ls -t /boot/config-* | head -1)
+              cp "$LATEST_CONFIG" .config
+              cp "$LATEST_CONFIG" /tmp/localmod-config/original-config
             fi
           else
             echo "❌ Cannot find kernel config in /proc/config.gz or /boot/config-*"
@@ -133,7 +137,15 @@ jobs:
             exit 1
           fi
           
-          if [ -f /tmp/localmod-config/current-config ]; then
+          if [ -f .config ]; then
+            
+            # Count original config modules
+            ORIGINAL_MODULE_COUNT=$(grep "^CONFIG_.*=m$" .config | wc -l)
+            ORIGINAL_BUILTIN_COUNT=$(grep "^CONFIG_.*=y$" .config | wc -l)
+            echo "📊 Original config stats:"
+            echo "  - Modules (=m): $ORIGINAL_MODULE_COUNT"
+            echo "  - Built-in (=y): $ORIGINAL_BUILTIN_COUNT"
+            echo "  - Total loaded modules in system: $TOTAL_LOADED_MODULES"
             
             # Extract information about currently loaded modules and hardware
             echo "🖥️ Extracting hardware and module information..."
@@ -159,28 +171,59 @@ jobs:
             # Get loaded modules with their dependencies
             cat /proc/modules > /tmp/localmod-config/proc-modules.txt
             
+            # Create a modules whitelist based on currently loaded modules
+            echo "📝 Creating module whitelist from loaded modules..."
+            awk 'NR>1 {print $1}' /proc/modules | sort > /tmp/localmod-config/loaded-module-names.txt
+            
+            echo "🏗️ Running make localmodconfig to generate minimal config..."
+            
+            # Set environment for reproducible builds
+            export KBUILD_BUILD_TIMESTAMP=""
+            
+            # Run make localmodconfig to generate minimal config based on loaded modules
+            make localmodconfig
+            
+            # Save the generated localmodconfig
+            cp .config /tmp/localmod-config/current-config
+            
+            # Count resulting config modules
+            LOCALMOD_MODULE_COUNT=$(grep "^CONFIG_.*=m$" .config | wc -l)
+            LOCALMOD_BUILTIN_COUNT=$(grep "^CONFIG_.*=y$" .config | wc -l)
+            
+            echo "📊 Localmodconfig results:"
+            echo "  - Modules (=m): $LOCALMOD_MODULE_COUNT (was $ORIGINAL_MODULE_COUNT)"
+            echo "  - Built-in (=y): $LOCALMOD_BUILTIN_COUNT (was $ORIGINAL_BUILTIN_COUNT)"
+            
+            # Calculate reductions
+            MODULE_REDUCTION=$(echo "scale=1; $ORIGINAL_MODULE_COUNT / $LOCALMOD_MODULE_COUNT" | bc -l 2>/dev/null || echo "N/A")
+            MODULE_PERCENT=$(echo "scale=1; (($ORIGINAL_MODULE_COUNT - $LOCALMOD_MODULE_COUNT) * 100) / $ORIGINAL_MODULE_COUNT" | bc -l 2>/dev/null || echo "N/A")
+            
+            echo "  - Module reduction: ${MODULE_REDUCTION}x (${MODULE_PERCENT}% fewer modules)"
+            
             # Create a summary of essential modules/features for this instance type
             cat > /tmp/localmod-config/instance-summary.txt << EOF
           Instance Type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           Image Type: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Kernel: $(uname -r)
 
+          Localmodconfig Statistics:
+          - Original modules: $ORIGINAL_MODULE_COUNT
+          - Localmod modules: $LOCALMOD_MODULE_COUNT
+          - Module reduction: ${MODULE_REDUCTION}x (${MODULE_PERCENT}% fewer)
+          - Loaded modules in system: $TOTAL_LOADED_MODULES
+
           Essential Features Detected:
           - CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
           - Total RAM: $(free -h | grep "Mem:" | awk '{print $2}')
           - Network interfaces: $(ip link show | grep "^[0-9]" | wc -l)
           - Block devices: $(lsblk | grep "disk" | wc -l)
-          - Loaded modules: $(lsmod | wc -l)
 
           Hardware Details:
           $(lscpu | head -10)
           EOF
             
-            # Create a modules whitelist based on currently loaded modules
-            echo "📝 Creating module whitelist from loaded modules..."
-            awk 'NR>1 {print $1}' /proc/modules | sort > /tmp/localmod-config/loaded-module-names.txt
-            
-            echo "✅ Generated localmod information (modules: $(wc -l < /tmp/localmod-config/loaded-module-names.txt))"
+            echo "✅ Generated localmodconfig successfully!"
+            echo "📊 Module count reduced from $ORIGINAL_MODULE_COUNT to $LOCALMOD_MODULE_COUNT (${MODULE_REDUCTION}x reduction)"
             echo "📦 Files created:"
             ls -la /tmp/localmod-config/
           fi
@@ -332,10 +375,10 @@ jobs:
           echo "  - initramfs-tools-config-${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}"
           echo "  - system-info-${{ inputs.instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}"
           echo ""
-          echo "💡 Use the localmod-config to significantly reduce kernel build times:"
-          echo "   - Contains only modules for hardware present on ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
-          echo "   - Can reduce module count from ~7000 to ~200 (35x reduction)"
-          echo "   - Apply with: make localmodconfig (after loading all needed modules)"
+          echo "💡 Generated localmod-config significantly reduces kernel build times:"
+          echo "   - Generated using make localmodconfig for hardware present on ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
+          echo "   - Typical reduction: module count from ~7000 to ~200 (35x reduction)"
+          echo "   - Ready to use directly in kernel builds"
           echo ""
           echo "🚀 You can now use these configurations to optimize your build-initrd.sh"
           echo "   script for both performance and compatibility with AWS AMIs!"
