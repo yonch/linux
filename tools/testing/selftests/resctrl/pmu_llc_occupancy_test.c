@@ -104,6 +104,29 @@ static void create_single_cycle_permutation(uint32_t *perm, size_t n)
 	free(pool);
 }
 
+static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
+{
+	char path[512];
+	FILE *file;
+
+	snprintf(path, sizeof(path), "%s/mon_groups/%s/tasks", RESCTRL_PATH, group_name);
+	
+	file = fopen(path, "w");
+	if (!file) {
+		ksft_print_msg("Failed to open %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	
+	if (fprintf(file, "%d\n", pid) < 0) {
+		ksft_print_msg("Failed to write PID %d to %s\n", pid, path);
+		fclose(file);
+		return -1;
+	}
+	
+	fclose(file);
+	return 0;
+}
+
 /* Child process: Walk the permutation continuously */
 static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
@@ -174,29 +197,6 @@ static int create_monitoring_group(const char *group_name)
 		return -1;
 	}
 	
-	return 0;
-}
-
-static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
-{
-	char path[512];
-	FILE *file;
-
-	snprintf(path, sizeof(path), "%s/mon_groups/%s/tasks", RESCTRL_PATH, group_name);
-	
-	file = fopen(path, "w");
-	if (!file) {
-		ksft_print_msg("Failed to open %s: %s\n", path, strerror(errno));
-		return -1;
-	}
-	
-	if (fprintf(file, "%d\n", pid) < 0) {
-		ksft_print_msg("Failed to write PID %d to %s\n", pid, path);
-		fclose(file);
-		return -1;
-	}
-	
-	fclose(file);
 	return 0;
 }
 
