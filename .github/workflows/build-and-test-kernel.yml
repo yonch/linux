@@ -198,11 +198,12 @@ jobs:
             tar -xzf localmod-config.tar.gz
             if [ -f "localmod-config/current-config" ]; then
               echo "✅ Found localmodconfig base configuration"
-              # Save config directly to build directory for out-of-tree builds
-              mkdir -p "$BUILD_DIR"
-              cp localmod-config/current-config "$BUILD_DIR/.config"
-              echo "📁 Config saved to: $BUILD_DIR/.config"
-              echo "📊 Config stats: $(wc -l "$BUILD_DIR/.config" | cut -d' ' -f1) lines"
+              # Save config to temporary location for processing
+              TEMP_CONFIG="/tmp/temp-kernel-config"
+              cp localmod-config/current-config "$TEMP_CONFIG"
+              echo "TEMP_CONFIG=$TEMP_CONFIG" >> $GITHUB_ENV
+              echo "📁 Config staged to: $TEMP_CONFIG"
+              echo "📊 Config stats: $(wc -l "$TEMP_CONFIG" | cut -d' ' -f1) lines"
               echo "📋 Module information available:"
               if [ -f "localmod-config/loaded-module-names.txt" ]; then
                 echo "  - Loaded modules: $(wc -l < localmod-config/loaded-module-names.txt)"
@@ -223,6 +224,7 @@ jobs:
         run: |
           echo "🔧 Configuring kernel build..."
           echo "Build directory: $BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
           
           if [ "${{ inputs.build-type }}" = "tinyconfig" ]; then
             echo "Using tinyconfig (minimal kernel)"
@@ -232,46 +234,96 @@ jobs:
             make O="$BUILD_DIR" defconfig
           else
             echo "Using localmodconfig (optimized for target hardware)"
-            # Config should already be in build directory from extraction step
-            if [ -f "$BUILD_DIR/.config" ]; then
-              echo "✅ Using .config from build directory"
-              echo "Config size: $(wc -l < "$BUILD_DIR/.config") lines"
+            # Process config in temporary location first
+            if [ -f "$TEMP_CONFIG" ]; then
+              echo "✅ Processing config from temporary location"
+              echo "Temp config size: $(wc -l < "$TEMP_CONFIG") lines"
+              
+              # Copy to a working location for modifications
+              WORK_CONFIG="/tmp/work-kernel-config"
+              cp "$TEMP_CONFIG" "$WORK_CONFIG"
+              
+              # Apply all modifications to the working config
+              echo "🚀 Applying build optimizations to working config..."
+              scripts/config --file "$WORK_CONFIG" --enable CONFIG_TRIM_UNUSED_KSYMS
+              
+              if [ "${{ inputs.enable-debug }}" != "true" ]; then
+                echo "Disabling debug features for faster builds..."
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_INFO
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_KERNEL
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_MISC
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_VM
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_PAGEALLOC
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_SLUB
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_LOCKDEP
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_PROVE_LOCKING
+                scripts/config --file "$WORK_CONFIG" --disable CONFIG_DEBUG_LOCK_ALLOC
+              fi
+              
+              scripts/config --file "$WORK_CONFIG" --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
+              scripts/config --file "$WORK_CONFIG" --enable CONFIG_MODULES
+              scripts/config --file "$WORK_CONFIG" --enable CONFIG_MODULE_UNLOAD
+              
+              echo "🔧 Clearing Debian-specific certificate paths..."
+              scripts/config --file "$WORK_CONFIG" --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+              scripts/config --file "$WORK_CONFIG" --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+              
+              # Now check if the config has actually changed
+              echo "📊 Comparing configs to determine if update needed..."
+              CONFIG_CHANGED=0
+              if [ -f "$BUILD_DIR/.config" ]; then
+                # Normalize both configs before comparison (sort and remove comments)
+                grep -v '^#' "$WORK_CONFIG" | grep -v '^$' | sort > /tmp/new-config-normalized
+                grep -v '^#' "$BUILD_DIR/.config" | grep -v '^$' | sort > /tmp/old-config-normalized
+                
+                if diff -q /tmp/new-config-normalized /tmp/old-config-normalized > /dev/null 2>&1; then
+                  echo "✅ Config unchanged - preserving existing build directory cache"
+                  echo "📁 Using existing .config from cached build directory"
+                  CONFIG_CHANGED=0
+                else
+                  echo "🔄 Config has changed - updating build directory"
+                  echo "📊 Brief summary of differences:"
+                  diff -u /tmp/old-config-normalized /tmp/new-config-normalized | head -20 || true
+                  cp "$WORK_CONFIG" "$BUILD_DIR/.config"
+                  echo "📝 Config updated in build directory"
+                  CONFIG_CHANGED=1
+                fi
+                rm -f /tmp/new-config-normalized /tmp/old-config-normalized
+              else
+                echo "📝 No existing config - copying new config to build directory"
+                cp "$WORK_CONFIG" "$BUILD_DIR/.config"
+                CONFIG_CHANGED=1
+              fi
+              
+              # Report cache impact
+              if [ "$CONFIG_CHANGED" -eq 0 ]; then
+                echo ""
+                echo "🎯 CACHE OPTIMIZATION SUCCESS"
+                echo "============================="
+                echo "✅ Config is identical to cached version"
+                echo "✅ Build directory cache will be fully utilized"
+                echo "⚡ Expect significantly faster build times"
+              else
+                echo ""
+                echo "⚠️  CACHE UPDATE REQUIRED"
+                echo "========================"
+                echo "📝 Config has been updated with new settings"
+                echo "🔄 Build directory cache may be partially invalidated"
+                echo "⏱️  Build time may increase for changed components"
+              fi
+              
+              rm -f "$WORK_CONFIG"
             else
-              echo "❌ ERROR: No .config file found in build directory"
-              echo "Build directory contents:"
-              ls -la "$BUILD_DIR/" || true
+              echo "❌ ERROR: No temp config file found"
               exit 1
             fi
+            
+            # Run olddefconfig to ensure config is valid
             KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           fi
-
-          echo "🚀 Applying build optimizations..."
-          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_TRIM_UNUSED_KSYMS
           
-          if [ "${{ inputs.enable-debug }}" != "true" ]; then
-            echo "Disabling debug features for faster builds..."
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_INFO
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_KERNEL
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_MISC
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_VM
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_PAGEALLOC
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_SLUB
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_LOCKDEP
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_PROVE_LOCKING
-            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_LOCK_ALLOC
-          fi
-          
-          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
-          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MODULES
-          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MODULE_UNLOAD
-          
-          echo "🔧 Clearing Debian-specific certificate paths..."
-          scripts/config --file "$BUILD_DIR/.config" --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
-          scripts/config --file "$BUILD_DIR/.config" --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
-          
-          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
-          
+          echo ""
           echo "📋 Final kernel configuration:"
           echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)"
           echo "  - Modules enabled: $(grep -c "=m$" "$BUILD_DIR/.config" || echo 0)"
