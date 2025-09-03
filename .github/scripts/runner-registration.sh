@@ -175,7 +175,8 @@ wait_for_runner() {
     local elapsed=0
     
     while [[ $elapsed -lt $timeout_seconds ]]; do
-        STATUS=$(check_runner_status "$github_token" "$runner_label")
+        # Use || true to prevent set -e from exiting on non-zero return
+        STATUS=$(check_runner_status "$github_token" "$runner_label" || true)
         
         if [[ "$STATUS" == "online" ]]; then
             log "✅ Runner is online!"

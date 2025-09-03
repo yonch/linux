@@ -273,7 +273,7 @@ jobs:
           KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           
           echo "📋 Final kernel configuration:"
-          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC=\"ccache gcc\" kernelrelease)"
+          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)"
           echo "  - Modules enabled: $(grep -c "=m$" "$BUILD_DIR/.config" || echo 0)"
           echo "  - Built-in features: $(grep -c "=y$" "$BUILD_DIR/.config" || echo 0)"
           echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" "$BUILD_DIR/.config" || echo 0)"
@@ -540,7 +540,7 @@ jobs:
           echo ""
           echo "🎯 KERNEL BUILD COMPLETED SUCCESSFULLY!"
           echo "======================================"
-          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O=\"$BUILD_DIR\" CC=\"ccache gcc\" kernelrelease)"
+          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)"
           echo "✅ Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "✅ GitHub release created: ${{ steps.release_info.outputs.release_tag }}"
           echo ""
