@@ -275,8 +275,12 @@ static int resctrl_event_add(struct perf_event *event, int flags)
 	pr_info("PMU add called: cpu=%d, flags=0x%x, state=%d\n", 
 		smp_processor_id(), flags, event->state);
 	
+	/* For system-wide PMUs, we need to manually set the event to ACTIVE
+	 * since event_sched_in() isn't called for events added to inactive contexts */
 	if (flags & PERF_EF_START) {
 		pr_info("PMU add: Starting event (PERF_EF_START set)\n");
+		event->state = PERF_EVENT_STATE_ACTIVE;
+		event->oncpu = smp_processor_id();
 		resctrl_event_start(event, flags);
 	}
 

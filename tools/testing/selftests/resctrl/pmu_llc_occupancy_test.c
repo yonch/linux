@@ -162,9 +162,13 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Walk through the flush permutation once to ensure it's in cache */
 	ksft_print_msg("Walking flush permutation to ensure cache eviction...\n");
 	idx = 0;
+	volatile uint64_t flush_checksum = 0;  /* Prevent optimization */
 	for (size_t i = 0; i < flush_size; i++) {
+		flush_checksum += flush_perm[idx];
 		idx = flush_perm[idx];
 	}
+	/* Use the checksum to ensure it's not optimized out */
+	ksft_print_msg("Flush walk checksum: 0x%lx\n", (unsigned long)flush_checksum);
 	
 	/* Free the flush permutation - we're done with it */
 	free(flush_perm);
@@ -189,7 +193,11 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 
 	/* Step 4: Walk the initial permutation continuously (this will bring it back into cache) */
 	idx = 0;
+	volatile uint64_t checksum = 0;  /* Use volatile to prevent optimization */
+	
 	while (1) {
+		/* Read and accumulate the value to ensure memory access happens */
+		checksum += initial_perm[idx];
 		idx = initial_perm[idx];
 		iterations++;
 
@@ -204,6 +212,10 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 			}
 		}
 	}
+	
+	/* Output the checksum to kernel log to absolutely ensure it's not optimized out */
+	ksft_print_msg("Permutation walk completed: %lu iterations, checksum: 0x%lx\n", 
+		       iterations, (unsigned long)checksum);
 
 	free(initial_perm);
 	exit(0);
