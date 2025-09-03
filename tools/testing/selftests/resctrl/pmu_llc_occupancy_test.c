@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <sys/mman.h>
+#include <string.h>
 
 #define RESCTRL_PMU_NAME "resctrl"
 #define ARRAY_SIZE_MB 1
@@ -130,30 +131,45 @@ static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
 /* Child process: Walk the permutation continuously */
 static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
-	uint32_t *perm;
+	uint32_t *initial_perm;
+	uint32_t *working_perm;
 	struct timespec start, now;
 	size_t idx;
 	size_t iterations = 0;
 	uint8_t ready = 1;
 
-	/* Add ourselves to the monitoring group BEFORE allocating memory */
+	/* Step 1: Generate initial permutation (not tracked by resctrl) */
+	initial_perm = malloc(n * sizeof(uint32_t));
+	if (!initial_perm) {
+		perror("malloc initial_perm");
+		exit(1);
+	}
+	create_single_cycle_permutation(initial_perm, n);
+
+	/* Step 2: Add ourselves to the monitoring group */
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
+		free(initial_perm);
 		exit(1);
 	}
 
-	/* Now allocate and create the permutation - this will be tracked by resctrl */
-	perm = malloc(n * sizeof(uint32_t));
-	if (!perm) {
-		perror("malloc");
+	/* Step 3: Allocate second array (this allocation will be tracked by resctrl) */
+	working_perm = malloc(n * sizeof(uint32_t));
+	if (!working_perm) {
+		perror("malloc working_perm");
+		free(initial_perm);
 		exit(1);
 	}
-	
-	/* Create the permutation directly in the child */
-	create_single_cycle_permutation(perm, n);
+
+	/* Step 4: Copy from first array to second */
+	memcpy(working_perm, initial_perm, n * sizeof(uint32_t));
+
+	/* Free the initial array as it's no longer needed */
+	free(initial_perm);
 
 	/* Signal parent that we're ready */
 	if (write(ready_fd, &ready, 1) != 1) {
 		perror("write ready signal");
+		free(working_perm);
 		exit(1);
 	}
 	close(ready_fd);
@@ -161,10 +177,10 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Get start time */
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Walk the permutation continuously */
+	/* Step 5: Walk the second (working) array continuously */
 	idx = 0;
 	while (1) {
-		idx = perm[idx];
+		idx = working_perm[idx];
 		iterations++;
 
 		/* Check time every ITERATIONS_PER_CHECK iterations */
@@ -179,7 +195,7 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 		}
 	}
 
-	free(perm);
+	free(working_perm);
 	exit(0);
 }
 
