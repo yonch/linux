@@ -198,8 +198,33 @@ out_fput:
  */
 static void resctrl_event_update(struct perf_event *event)
 {
-	/* Currently just a stub - would read actual cache occupancy here */
-	local64_set(&event->hw.prev_count, 0);
+	struct resctrl_pmu_event *resctrl_event = event->pmu_private;
+	struct rdtgroup *rdtgrp = resctrl_event->rdtgrp;
+	struct rmid_read rr;
+	u64 value = 0;
+
+	/* Check if rdtgroup has been deleted */
+	if (rdtgrp->flags & RDT_DELETED) {
+		local64_set(&event->hw.prev_count, 0);
+		return;
+	}
+
+	/* Setup rmid_read structure with current parameters */
+	rr = resctrl_event->rr;
+	rr.cpu = smp_processor_id();
+	rr.val = 0;
+	rr.err = 0;
+
+	/* Take cpus read lock only around the actual RMID read */
+	cpus_read_lock();
+	mon_perform_rmid_read_this_cpu(&rr);
+	cpus_read_unlock();
+
+	/* Update counter value based on read result */
+	if (!rr.err)
+		value = rr.val;
+
+	local64_set(&event->hw.prev_count, value);
 }
 
 /*
