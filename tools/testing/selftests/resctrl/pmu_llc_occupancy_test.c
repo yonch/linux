@@ -132,11 +132,12 @@ static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
 static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
 	uint32_t *initial_perm;
-	uint32_t *working_perm;
+	uint32_t *flush_perm;
 	struct timespec start, now;
 	size_t idx;
 	size_t iterations = 0;
 	uint8_t ready = 1;
+	size_t flush_size = (256 * MB) / sizeof(uint32_t);  /* 256MB array */
 
 	/* Step 1: Generate initial permutation (not tracked by resctrl) */
 	initial_perm = malloc(n * sizeof(uint32_t));
@@ -146,30 +147,39 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	}
 	create_single_cycle_permutation(initial_perm, n);
 
-	/* Step 2: Add ourselves to the monitoring group */
+	/* Step 2: Create and fill a huge 256MB permutation to flush the cache */
+	ksft_print_msg("Creating 256MB flush permutation to evict cache...\n");
+	flush_perm = malloc(flush_size * sizeof(uint32_t));
+	if (!flush_perm) {
+		perror("malloc flush_perm");
+		free(initial_perm);
+		exit(1);
+	}
+	
+	/* Generate the flush permutation (this will allocate another 256MB for the pool) */
+	create_single_cycle_permutation(flush_perm, flush_size);
+	
+	/* Walk through the flush permutation once to ensure it's in cache */
+	ksft_print_msg("Walking flush permutation to ensure cache eviction...\n");
+	idx = 0;
+	for (size_t i = 0; i < flush_size; i++) {
+		idx = flush_perm[idx];
+	}
+	
+	/* Free the flush permutation - we're done with it */
+	free(flush_perm);
+	ksft_print_msg("Cache flush complete, original permutation should be evicted\n");
+
+	/* Step 3: Now add ourselves to the monitoring group */
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
 		free(initial_perm);
 		exit(1);
 	}
 
-	/* Step 3: Allocate second array (this allocation will be tracked by resctrl) */
-	working_perm = malloc(n * sizeof(uint32_t));
-	if (!working_perm) {
-		perror("malloc working_perm");
-		free(initial_perm);
-		exit(1);
-	}
-
-	/* Step 4: Copy from first array to second */
-	memcpy(working_perm, initial_perm, n * sizeof(uint32_t));
-
-	/* Free the initial array as it's no longer needed */
-	free(initial_perm);
-
 	/* Signal parent that we're ready */
 	if (write(ready_fd, &ready, 1) != 1) {
 		perror("write ready signal");
-		free(working_perm);
+		free(initial_perm);
 		exit(1);
 	}
 	close(ready_fd);
@@ -177,10 +187,10 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Get start time */
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Step 5: Walk the second (working) array continuously */
+	/* Step 4: Walk the initial permutation continuously (this will bring it back into cache) */
 	idx = 0;
 	while (1) {
-		idx = working_perm[idx];
+		idx = initial_perm[idx];
 		iterations++;
 
 		/* Check time every ITERATIONS_PER_CHECK iterations */
@@ -195,7 +205,7 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 		}
 	}
 
-	free(working_perm);
+	free(initial_perm);
 	exit(0);
 }
 
