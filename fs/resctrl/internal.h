@@ -359,6 +359,7 @@ void mon_setup_rmid_read(struct rmid_read *rr, struct rdt_resource *r,
 int mon_event_read_setup(struct rmid_read *rr, cpumask_t **cpumask,
 			 struct mon_data *md, struct rdtgroup *rdtgrp);
 void mon_perform_rmid_read(struct rmid_read *rr, cpumask_t *cpumask);
+void mon_perform_rmid_read_this_cpu(struct rmid_read *rr);
 
 int resctrl_mon_resource_init(void);
 

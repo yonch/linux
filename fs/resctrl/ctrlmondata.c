@@ -640,6 +640,23 @@ void mon_perform_rmid_read(struct rmid_read *rr, cpumask_t *cpumask)
 	resctrl_arch_mon_ctx_free(rr->r, rr->evtid, rr->arch_mon_ctx);
 }
 
+void mon_perform_rmid_read_this_cpu(struct rmid_read *rr)
+{
+	/* Ensure we're not in a CPU hotplug race */
+	lockdep_assert_cpus_held();
+
+	rr->arch_mon_ctx = resctrl_arch_mon_ctx_alloc(rr->r, rr->evtid);
+	if (IS_ERR(rr->arch_mon_ctx)) {
+		rr->err = -EINVAL;
+		return;
+	}
+
+	/* Direct call on current CPU - no IPI needed */
+	mon_event_count(rr);
+
+	resctrl_arch_mon_ctx_free(rr->r, rr->evtid, rr->arch_mon_ctx);
+}
+
 int rdtgroup_mondata_show(struct seq_file *m, void *arg)
 {
 	struct kernfs_open_file *of = m->private;
