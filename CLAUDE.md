@@ -133,7 +133,7 @@ gh workflow run build-and-test-kernel.yml \
   --field instance-type=m7i.metal-24xl \
   --field image-type=ubuntu-24.04 \
   --field build-type=localmod \
-  --field test-instance-type=m7i.metal-24xl
+  --field instance-type=m7i.metal-24xl
 ```
 
 **Handling Timeout Issues**: The default bash timeout is 2 minutes. For long-running workflows, monitor progress with:
@@ -179,7 +179,7 @@ gh workflow run extract-kernel-config.yml --field instance-type=m7i.metal-24xl
 gh run watch  # Monitor until complete
 
 # 3. Build and test kernel with extracted config
-gh workflow run build-and-test-kernel.yml --field build-type=localmod --field test-instance-type=m7i.metal-24xl
+gh workflow run build-and-test-kernel.yml --field build-type=localmod --field instance-type=m7i.metal-24xl
 gh run watch  # Monitor build and test progress
 
 # 4. Examine detailed results
