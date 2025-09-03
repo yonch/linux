@@ -269,12 +269,21 @@ jobs:
               scripts/config --file "$WORK_CONFIG" --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
               scripts/config --file "$WORK_CONFIG" --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
               
+              # First, run olddefconfig in a temporary directory to generate full config
+              echo "📊 Generating full config with olddefconfig in temp directory..."
+              TEMP_BUILD_DIR="/tmp/temp-config-build"
+              mkdir -p "$TEMP_BUILD_DIR"
+              cp "$WORK_CONFIG" "$TEMP_BUILD_DIR/.config"
+              
+              # Run olddefconfig in temp directory to generate fully expanded config
+              KBUILD_BUILD_TIMESTAMP='' make O="$TEMP_BUILD_DIR" CC="ccache gcc" olddefconfig
+              
               # Now check if the config has actually changed
-              echo "📊 Comparing configs to determine if update needed..."
+              echo "📊 Comparing fully expanded configs to determine if update needed..."
               CONFIG_CHANGED=0
               if [ -f "$BUILD_DIR/.config" ]; then
                 # Normalize both configs before comparison (sort and remove comments)
-                grep -v '^#' "$WORK_CONFIG" | grep -v '^$' | sort > /tmp/new-config-normalized
+                grep -v '^#' "$TEMP_BUILD_DIR/.config" | grep -v '^$' | sort > /tmp/new-config-normalized
                 grep -v '^#' "$BUILD_DIR/.config" | grep -v '^$' | sort > /tmp/old-config-normalized
                 
                 if diff -q /tmp/new-config-normalized /tmp/old-config-normalized > /dev/null 2>&1; then
@@ -285,16 +294,19 @@ jobs:
                   echo "🔄 Config has changed - updating build directory"
                   echo "📊 Brief summary of differences:"
                   diff -u /tmp/old-config-normalized /tmp/new-config-normalized | head -20 || true
-                  cp "$WORK_CONFIG" "$BUILD_DIR/.config"
-                  echo "📝 Config updated in build directory"
+                  cp "$TEMP_BUILD_DIR/.config" "$BUILD_DIR/.config"
+                  echo "📝 Config updated in build directory with fully expanded config"
                   CONFIG_CHANGED=1
                 fi
                 rm -f /tmp/new-config-normalized /tmp/old-config-normalized
               else
-                echo "📝 No existing config - copying new config to build directory"
-                cp "$WORK_CONFIG" "$BUILD_DIR/.config"
+                echo "📝 No existing config - copying expanded config to build directory"
+                cp "$TEMP_BUILD_DIR/.config" "$BUILD_DIR/.config"
                 CONFIG_CHANGED=1
               fi
+              
+              # Clean up temp directory
+              rm -rf "$TEMP_BUILD_DIR"
               
               # Report cache impact
               if [ "$CONFIG_CHANGED" -eq 0 ]; then
@@ -304,6 +316,7 @@ jobs:
                 echo "✅ Config is identical to cached version"
                 echo "✅ Build directory cache will be fully utilized"
                 echo "⚡ Expect significantly faster build times"
+                echo "📝 No olddefconfig needed in build directory - preserving cache!"
               else
                 echo ""
                 echo "⚠️  CACHE UPDATE REQUIRED"
@@ -318,9 +331,6 @@ jobs:
               echo "❌ ERROR: No temp config file found"
               exit 1
             fi
-            
-            # Run olddefconfig to ensure config is valid
-            KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           fi
           
           echo ""
@@ -330,19 +340,20 @@ jobs:
           echo "  - Built-in features: $(grep -c "=y$" "$BUILD_DIR/.config" || echo 0)"
           echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" "$BUILD_DIR/.config" || echo 0)"
 
-      - name: Build kernel
+      - name: Build kernel bzImage
         run: |
-          echo "🔨 Starting kernel build..."
+          echo "🔨 Starting kernel bzImage build..."
           echo "Using $(nproc) CPU cores for parallel compilation"
           echo "Build directory: $BUILD_DIR"
+          echo "Target: bzImage (compressed bootable kernel)"
           
           START_TIME=$(date +%s)
-          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
+          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" -j$(($(nproc) + 1)) bzImage 2>&1 | tee build.log
           
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
           echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
-          echo "⏰ Build completed in ${BUILD_TIME} seconds ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
+          echo "⏰ bzImage build completed in ${BUILD_TIME} seconds ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
           
           echo "📊 ccache statistics:"
           ccache -s
