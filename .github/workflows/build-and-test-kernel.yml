@@ -84,28 +84,12 @@ jobs:
           packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd dracut-core
           version: 1.0
 
-      - name: Setup build directory
-        run: |
-          echo "📁 Setting up out-of-tree build directory..."
-          BUILD_DIR="/tmp/kernel-build"
-          mkdir -p "$BUILD_DIR"
-          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
-          echo "Build directory: $BUILD_DIR"
-
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: ccache-${{ inputs.build-type || 'localmod' }}
           max-size: 8G
           verbose: 2
-
-      - name: Cache build directory
-        uses: actions/cache@v4
-        with:
-          path: /tmp/kernel-build
-          key: build-dir-${{ inputs.build-type || 'localmod' }}-${{ github.sha }}
-          restore-keys: |
-            build-dir-${{ inputs.build-type || 'localmod' }}-
 
       - name: Configure ccache for kernel builds
         run: |
