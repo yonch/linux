@@ -226,6 +226,29 @@ jobs:
             exit 1
           fi
 
+      - name: Clean source tree for out-of-tree build
+        run: |
+          echo "🧹 Cleaning source tree for out-of-tree build..."
+          # Check if there are any build artifacts in the source tree
+          if [ -f "vmlinux" ] || [ -f "Module.symvers" ] || [ -d "arch/x86/boot/compressed" ]; then
+            echo "Found build artifacts in source tree that need cleaning"
+            # Save .config if it exists
+            if [ -f ".config" ]; then
+              echo "Saving .config before cleaning..."
+              cp .config /tmp/saved.config
+            fi
+            # Clean the source tree
+            make mrproper
+            # Restore .config if it was saved
+            if [ -f "/tmp/saved.config" ]; then
+              echo "Restoring .config..."
+              cp /tmp/saved.config .config
+            fi
+            echo "✅ Source tree cleaned"
+          else
+            echo "✅ Source tree is already clean"
+          fi
+
       - name: Configure kernel
         run: |
           echo "🔧 Configuring kernel build..."
