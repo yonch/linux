@@ -122,9 +122,13 @@ jobs:
         run: |
           echo "📊 Generating configuration hash for cache key..."
           CONFIG_HASH="none"
-          if [ -f ".config" ]; then
-            CONFIG_HASH=$(sha256sum .config | cut -d' ' -f1 | cut -c1-16)
-            echo "✅ Config hash: $CONFIG_HASH"
+          # For out-of-tree builds, config should be in build dir or temp location
+          if [ -f "$BUILD_DIR/.config" ]; then
+            CONFIG_HASH=$(sha256sum "$BUILD_DIR/.config" | cut -d' ' -f1 | cut -c1-16)
+            echo "✅ Config hash from build dir: $CONFIG_HASH"
+          elif [ -f "/tmp/extracted.config" ]; then
+            CONFIG_HASH=$(sha256sum /tmp/extracted.config | cut -d' ' -f1 | cut -c1-16)
+            echo "✅ Config hash from extracted: $CONFIG_HASH"
           else
             echo "⚠️ No config yet, will compute after configuration"
           fi
@@ -210,7 +214,8 @@ jobs:
             tar -xzf localmod-config.tar.gz
             if [ -f "localmod-config/current-config" ]; then
               echo "✅ Found localmodconfig base configuration"
-              cp localmod-config/current-config ../.config
+              # Don't put .config in source tree for out-of-tree builds
+              cp localmod-config/current-config /tmp/extracted.config
               echo "📋 Module information available:"
               if [ -f "localmod-config/loaded-module-names.txt" ]; then
                 echo "  - Loaded modules: $(wc -l < localmod-config/loaded-module-names.txt)"
@@ -226,28 +231,20 @@ jobs:
             exit 1
           fi
 
-      - name: Clean source tree for out-of-tree build
+      - name: Ensure clean source tree
         run: |
-          echo "🧹 Cleaning source tree for out-of-tree build..."
-          # Check if there are any build artifacts in the source tree
-          if [ -f "vmlinux" ] || [ -f "Module.symvers" ] || [ -d "arch/x86/boot/compressed" ]; then
-            echo "Found build artifacts in source tree that need cleaning"
-            # Save .config if it exists
-            if [ -f ".config" ]; then
-              echo "Saving .config before cleaning..."
-              cp .config /tmp/saved.config
-            fi
-            # Clean the source tree
-            make mrproper
-            # Restore .config if it was saved
-            if [ -f "/tmp/saved.config" ]; then
-              echo "Restoring .config..."
-              cp /tmp/saved.config .config
-            fi
-            echo "✅ Source tree cleaned"
-          else
-            echo "✅ Source tree is already clean"
+          echo "🧹 Ensuring source tree is clean for out-of-tree build..."
+          # The source tree must be completely clean for out-of-tree builds
+          # Remove any .config or build artifacts from source tree
+          if [ -f ".config" ]; then
+            echo "Removing .config from source tree (will use build directory instead)"
+            rm -f .config
           fi
+          if [ -f "include/config/auto.conf" ] || [ -f "include/generated/autoconf.h" ]; then
+            echo "Found generated files, cleaning source tree..."
+            make mrproper
+          fi
+          echo "✅ Source tree is clean"
 
       - name: Configure kernel
         run: |
@@ -262,14 +259,15 @@ jobs:
             make O="$BUILD_DIR" defconfig
           else
             echo "Using localmodconfig (optimized for target hardware)"
-            if [ ! -f ".config" ]; then
-              echo "❌ ERROR: No .config file found after localmodconfig extraction"
-              exit 1
-            fi
-            # Copy config to build directory if not already there
+            # Check if config exists in build directory (from cache) or needs to be copied
             if [ ! -f "$BUILD_DIR/.config" ]; then
-              cp .config "$BUILD_DIR/.config"
-              echo "Copied .config to build directory"
+              if [ -f "/tmp/extracted.config" ]; then
+                echo "Copying extracted config to build directory"
+                cp /tmp/extracted.config "$BUILD_DIR/.config"
+              else
+                echo "❌ ERROR: No config file found to use"
+                exit 1
+              fi
             else
               echo "Using existing .config from cached build directory"
             fi
