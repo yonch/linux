@@ -203,8 +203,12 @@ static void resctrl_event_update(struct perf_event *event)
 	struct rmid_read rr;
 	u64 value = 0;
 
+	pr_info("PMU update called: cpu=%d\n", smp_processor_id());
+
 	/* Check if rdtgroup has been deleted */
 	if (rdtgrp->flags & RDT_DELETED) {
+		pr_info("PMU update: rdtgroup deleted (closid=%u, rmid=%u)\n",
+			rdtgrp->closid, rdtgrp->mon.rmid);
 		WARN_ONCE(1, "resctrl PMU: attempting to read from deleted rdtgroup (closid=%u, rmid=%u)\n",
 			  rdtgrp->closid, rdtgrp->mon.rmid);
 		local64_set(&event->hw.prev_count, 0);
@@ -216,15 +220,22 @@ static void resctrl_event_update(struct perf_event *event)
 	rr.val = 0;
 	rr.err = 0;
 
+	pr_info("PMU update: before RMID read - closid=%u, rmid=%u, evtid=%d, d=%p\n",
+		rdtgrp->closid, rdtgrp->mon.rmid, rr.evtid, rr.d);
+
 	/* Take cpus read lock only around the actual RMID read */
 	cpus_read_lock();
 	mon_perform_rmid_read_this_cpu(&rr);
 	cpus_read_unlock();
 
+	pr_info("PMU update: after RMID read - val=%llu, err=%d\n", rr.val, rr.err);
+
 	/* Update counter value based on read result */
 	if (!rr.err) {
 		value = rr.val;
+		pr_info("PMU update: success, value=%llu\n", value);
 	} else {
+		pr_info("PMU update: error %d reading RMID\n", rr.err);
 		WARN_ONCE(1, "resctrl PMU: RMID read error (err=%d) for closid=%u, rmid=%u, evtid=%d\n",
 			  rr.err, rdtgrp->closid, rdtgrp->mon.rmid, rr.evtid);
 	}
@@ -237,8 +248,14 @@ static void resctrl_event_update(struct perf_event *event)
  */
 static void resctrl_event_start(struct perf_event *event, int flags)
 {
+	pr_info("PMU start called: cpu=%d, flags=0x%x, state=%d, oncpu=%d\n",
+		smp_processor_id(), flags, event->state, event->oncpu);
+		
 	/* Save current counter value as the starting point */
 	resctrl_event_update(event);
+	
+	pr_info("PMU start completed: state=%d, oncpu=%d\n",
+		event->state, event->oncpu);
 }
 
 /*
@@ -255,9 +272,17 @@ static void resctrl_event_stop(struct perf_event *event, int flags)
  */
 static int resctrl_event_add(struct perf_event *event, int flags)
 {
-	if (flags & PERF_EF_START)
+	pr_info("PMU add called: cpu=%d, flags=0x%x, state=%d\n", 
+		smp_processor_id(), flags, event->state);
+	
+	if (flags & PERF_EF_START) {
+		pr_info("PMU add: Starting event (PERF_EF_START set)\n");
 		resctrl_event_start(event, flags);
+	}
 
+	pr_info("PMU add completed: state=%d, oncpu=%d\n", 
+		event->state, event->oncpu);
+	
 	return 0;
 }
 
