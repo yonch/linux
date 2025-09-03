@@ -246,5 +246,6 @@ extern struct resctrl_test l3_noncont_cat_test;
 extern struct resctrl_test l2_noncont_cat_test;
 extern struct resctrl_test pmu_test;
 extern struct resctrl_test pmu_open_allowed_files_test;
+extern struct resctrl_test pmu_llc_occupancy_test;
 
 #endif /* RESCTRL_H */
