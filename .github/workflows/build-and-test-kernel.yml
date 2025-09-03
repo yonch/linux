@@ -200,7 +200,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         with:
           name: localmod-config-${{ inputs.build-instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}
-          path: ./localmod-artifacts/
+          path: /tmp/localmod-artifacts/
           run_id: ${{ steps.find-extract-run.outputs.extract_run_id }}
           github_token: ${{ github.token }}
         
@@ -209,8 +209,8 @@ jobs:
         run: |
           echo "🔍 Extracting localmodconfig artifact..."
           echo "Build directory: $BUILD_DIR"
-          if [ -f "./localmod-artifacts/localmod-config.tar.gz" ]; then
-            cd localmod-artifacts
+          if [ -f "/tmp/localmod-artifacts/localmod-config.tar.gz" ]; then
+            cd /tmp/localmod-artifacts
             tar -xzf localmod-config.tar.gz
             if [ -f "localmod-config/current-config" ]; then
               echo "✅ Found localmodconfig base configuration"
@@ -224,7 +224,7 @@ jobs:
                 echo "  - Loaded modules: $(wc -l < localmod-config/loaded-module-names.txt)"
                 echo "  - Instance summary available: $([ -f localmod-config/instance-summary.txt ] && echo 'Yes' || echo 'No')"
               fi
-              cd ..
+              cd "$GITHUB_WORKSPACE"
             else
               echo "❌ Localmodconfig artifact incomplete - missing current-config file"
               exit 1
