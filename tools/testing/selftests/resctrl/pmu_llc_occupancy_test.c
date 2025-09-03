@@ -105,7 +105,7 @@ static void create_single_cycle_permutation(uint32_t *perm, size_t n)
 }
 
 /* Child process: Walk the permutation continuously */
-static void child_walk_permutation(uint32_t *src_perm, size_t n, int ready_fd)
+static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
 	uint32_t *perm;
 	struct timespec start, now;
@@ -113,13 +113,20 @@ static void child_walk_permutation(uint32_t *src_perm, size_t n, int ready_fd)
 	size_t iterations = 0;
 	uint8_t ready = 1;
 
-	/* Allocate and copy the permutation */
+	/* Add ourselves to the monitoring group BEFORE allocating memory */
+	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
+		exit(1);
+	}
+
+	/* Now allocate and create the permutation - this will be tracked by resctrl */
 	perm = malloc(n * sizeof(uint32_t));
 	if (!perm) {
 		perror("malloc");
 		exit(1);
 	}
-	memcpy(perm, src_perm, n * sizeof(uint32_t));
+	
+	/* Create the permutation directly in the child */
+	create_single_cycle_permutation(perm, n);
 
 	/* Signal parent that we're ready */
 	if (write(ready_fd, &ready, 1) != 1) {
@@ -298,7 +305,6 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 				       const struct user_params *uparams)
 {
 	const char *group_name = "pmu_llc_test";
-	uint32_t *permutation;
 	unsigned long resctrl_occupancy, pmu_occupancy;
 	int pmu_type;
 	pid_t child_pid;
@@ -321,24 +327,13 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		return -1;
 	}
 
-	/* Create 1MB array for permutation */
-	permutation = malloc(PERM_ARRAY_SIZE * sizeof(uint32_t));
-	if (!permutation) {
-		ksft_print_msg("Failed to allocate permutation array\n");
-		goto cleanup_group;
-	}
-
 	/* Initialize random seed */
 	srand(time(NULL));
-
-	/* Create single-cycle permutation */
-	ksft_print_msg("Creating single-cycle permutation of %zu elements\n", PERM_ARRAY_SIZE);
-	create_single_cycle_permutation(permutation, PERM_ARRAY_SIZE);
 
 	/* Create pipe for child ready signal */
 	if (pipe(pipe_fds) < 0) {
 		perror("pipe");
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	/* Fork child process */
@@ -347,13 +342,13 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		perror("fork");
 		close(pipe_fds[0]);
 		close(pipe_fds[1]);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	if (child_pid == 0) {
 		/* Child process */
 		close(pipe_fds[0]);
-		child_walk_permutation(permutation, PERM_ARRAY_SIZE, pipe_fds[1]);
+		child_walk_permutation(group_name, PERM_ARRAY_SIZE, pipe_fds[1]);
 		/* Should not reach here */
 		exit(1);
 	}
@@ -361,23 +356,18 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	/* Parent process */
 	close(pipe_fds[1]);
 
-	/* Wait for child to be ready */
+	/* Wait for child to be ready (it will add itself to the monitoring group first) */
 	if (read(pipe_fds[0], &ready, 1) != 1) {
 		ksft_print_msg("Failed to get ready signal from child\n");
 		close(pipe_fds[0]);
 		kill(child_pid, SIGKILL);
 		waitpid(child_pid, NULL, 0);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 	close(pipe_fds[0]);
 
-	/* Add child PID to monitoring group */
-	ksft_print_msg("Adding PID %d to monitoring group %s\n", child_pid, group_name);
-	if (add_pid_to_monitoring_group(group_name, child_pid) < 0) {
-		kill(child_pid, SIGKILL);
-		waitpid(child_pid, NULL, 0);
-		goto cleanup_perm;
-	}
+	ksft_print_msg("Child process (PID %d) ready and added to monitoring group %s\n", 
+		       child_pid, group_name);
 
 	/* Wait 500ms for cache to be populated */
 	ts.tv_sec = 0;
@@ -388,14 +378,14 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	if (read_llc_occupancy_from_resctrl(group_name, &resctrl_occupancy) < 0) {
 		kill(child_pid, SIGKILL);
 		waitpid(child_pid, NULL, 0);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	/* Read LLC occupancy from PMU */
 	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &pmu_occupancy) < 0) {
 		kill(child_pid, SIGKILL);
 		waitpid(child_pid, NULL, 0);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	/* Wait for child to complete */
@@ -411,14 +401,14 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	    resctrl_occupancy > MAX_EXPECTED_OCCUPANCY) {
 		ksft_print_msg("FAIL: Resctrl occupancy %lu outside expected range [%d, %.0f]\n",
 			       resctrl_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	if (pmu_occupancy < MIN_EXPECTED_OCCUPANCY || 
 	    pmu_occupancy > MAX_EXPECTED_OCCUPANCY) {
 		ksft_print_msg("FAIL: PMU occupancy %lu outside expected range [%d, %.0f]\n",
 			       pmu_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	/* Check if values are within 10% of each other */
@@ -431,15 +421,13 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	if (percent_diff > TOLERANCE_PERCENT) {
 		ksft_print_msg("FAIL: Difference %.1f%% exceeds tolerance %d%%\n",
 			       percent_diff, TOLERANCE_PERCENT);
-		goto cleanup_perm;
+		goto cleanup_group;
 	}
 
 	ksft_print_msg("PASS: PMU and resctrl measurements within %.1f%% of each other\n",
 		       percent_diff);
 	ret = 0;
 
-cleanup_perm:
-	free(permutation);
 cleanup_group:
 	remove_monitoring_group(group_name);
 	
