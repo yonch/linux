@@ -1,0 +1,969 @@
+name: Build and Test Linux Kernel with Resctrl PMU
+on: 
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      instance-type:
+        description: 'EC2 instance type for testing'
+        required: false
+        default: 'm7i.xlarge'
+        type: string
+      build-instance-type:
+        description: 'Instance type used for localmodconfig'
+        required: false
+        default: 'm7i.metal-24xl'
+        type: string
+      image-type:
+        description: 'Image type (ubuntu-22.04 or ubuntu-24.04)'
+        required: false
+        default: 'ubuntu-24.04'
+        type: string
+      build-type:
+        description: 'Build type (localmod, defconfig, or tinyconfig)'
+        required: false
+        default: 'localmod'
+        type: choice
+        options:
+        - localmod
+        - defconfig
+        - tinyconfig
+      enable-debug:
+        description: 'Enable debug features (slower build)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+  id-token: write # Required for AWS authentication
+
+jobs:
+  build-kernel:
+    name: Build Linux Kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      release-tag: ${{ steps.release_info.outputs.release_tag }}
+      kernel-version: ${{ steps.release_info.outputs.kernel_version }}
+    steps:
+      - name: Verify system info
+        run: |
+          echo "🚀 BUILD AND TEST LINUX KERNEL WITH RESCTRL PMU"
+          echo "================================================"
+          echo ""
+          echo "📍 Build instance type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}"
+          echo "📍 Test instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo "📍 Target image: ${{ inputs.image-type || 'ubuntu-24.04' }}"
+          echo "📍 Build type: ${{ inputs.build-type || 'localmod' }}"
+          echo "📍 Debug features: ${{ inputs.enable-debug || 'false' }}"
+          echo "📍 Runner CPUs: $(nproc)"
+          echo "📍 Available RAM: $(free -h | grep Mem: | awk '{print $2}')"
+          echo "📍 Available disk: $(df -h / | tail -1 | awk '{print $4}')"
+          echo "⏰ Build started: $(date)"
+          echo ""
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Cache and install build dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd dracut-core
+          version: 1.0
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-build-${{ inputs.build-type || 'localmod' }}
+          max-size: 8G
+          verbose: 2
+
+      - name: Configure ccache for kernel builds
+        run: |
+          echo "🔧 Configuring ccache for optimal kernel builds..."
+          echo "KBUILD_BUILD_TIMESTAMP=" >> $GITHUB_ENV
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
+          ccache -s
+          ccache -z
+
+      - name: Find latest extract workflow run
+        if: inputs.build-type == 'localmod' || !inputs.build-type
+        id: find-extract-run
+        run: |
+          echo "🔍 Finding latest extract workflow run with localmodconfig for ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}..."
+          
+          EXTRACT_RUN_ID=$(gh api repos/yonch/linux/actions/workflows/extract-kernel-config.yml/runs \
+            --jq '.workflow_runs[] | select(.status == "completed" and .conclusion == "success") | .id' \
+            | head -1)
+          
+          if [ -z "$EXTRACT_RUN_ID" ]; then
+            echo "❌ No successful extract workflow runs found"
+            echo "Please run the extract-kernel-config workflow first to generate localmodconfig"
+            exit 1
+          fi
+          
+          echo "✅ Found extract workflow run: $EXTRACT_RUN_ID"
+          echo "extract_run_id=$EXTRACT_RUN_ID" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download localmodconfig artifact
+        if: inputs.build-type == 'localmod' || !inputs.build-type
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: localmod-config-${{ inputs.build-instance-type || 'm7i.metal-24xl' }}-${{ inputs.image-type || 'ubuntu-24.04' }}
+          path: ./localmod-artifacts/
+          run_id: ${{ steps.find-extract-run.outputs.extract_run_id }}
+          github_token: ${{ github.token }}
+        
+      - name: Extract and prepare localmodconfig
+        if: inputs.build-type == 'localmod' || !inputs.build-type
+        run: |
+          echo "🔍 Extracting localmodconfig artifact..."
+          if [ -f "./localmod-artifacts/localmod-config.tar.gz" ]; then
+            cd localmod-artifacts
+            tar -xzf localmod-config.tar.gz
+            if [ -f "localmod-config/current-config" ]; then
+              echo "✅ Found localmodconfig base configuration"
+              cp localmod-config/current-config ../.config
+              echo "📋 Module information available:"
+              if [ -f "localmod-config/loaded-module-names.txt" ]; then
+                echo "  - Loaded modules: $(wc -l < localmod-config/loaded-module-names.txt)"
+                echo "  - Instance summary available: $([ -f localmod-config/instance-summary.txt ] && echo 'Yes' || echo 'No')"
+              fi
+              cd ..
+            else
+              echo "❌ Localmodconfig artifact incomplete - missing current-config file"
+              exit 1
+            fi
+          else
+            echo "❌ Localmodconfig artifact not found"
+            exit 1
+          fi
+
+      - name: Configure kernel
+        run: |
+          echo "🔧 Configuring kernel build..."
+          
+          if [ "${{ inputs.build-type }}" = "tinyconfig" ]; then
+            echo "Using tinyconfig (minimal kernel)"
+            make tinyconfig
+          elif [ "${{ inputs.build-type }}" = "defconfig" ]; then
+            echo "Using defconfig (default kernel config)"
+            make defconfig
+          else
+            echo "Using localmodconfig (optimized for target hardware)"
+            if [ ! -f ".config" ]; then
+              echo "❌ ERROR: No .config file found after localmodconfig extraction"
+              exit 1
+            fi
+            KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
+          fi
+
+          echo "🚀 Applying build optimizations..."
+          scripts/config --enable CONFIG_TRIM_UNUSED_KSYMS
+          
+          if [ "${{ inputs.enable-debug }}" != "true" ]; then
+            echo "Disabling debug features for faster builds..."
+            scripts/config --disable CONFIG_DEBUG_INFO
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+            scripts/config --disable CONFIG_DEBUG_KERNEL
+            scripts/config --disable CONFIG_DEBUG_MISC
+            scripts/config --disable CONFIG_DEBUG_VM
+            scripts/config --disable CONFIG_DEBUG_PAGEALLOC
+            scripts/config --disable CONFIG_DEBUG_SLUB
+            scripts/config --disable CONFIG_LOCKDEP
+            scripts/config --disable CONFIG_PROVE_LOCKING
+            scripts/config --disable CONFIG_DEBUG_LOCK_ALLOC
+          fi
+          
+          scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
+          scripts/config --enable CONFIG_MODULES
+          scripts/config --enable CONFIG_MODULE_UNLOAD
+          
+          echo "🔧 Clearing Debian-specific certificate paths..."
+          scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+          scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+          
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
+          
+          echo "📋 Final kernel configuration:"
+          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
+          echo "  - Modules enabled: $(grep -c "=m$" .config || echo 0)"
+          echo "  - Built-in features: $(grep -c "=y$" .config || echo 0)"
+          echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" .config || echo 0)"
+
+      - name: Build kernel
+        run: |
+          echo "🔨 Starting kernel build..."
+          echo "Using $(nproc) CPU cores for parallel compilation"
+          
+          START_TIME=$(date +%s)
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
+          
+          END_TIME=$(date +%s)
+          BUILD_TIME=$((END_TIME - START_TIME))
+          echo "⏰ Build completed in ${BUILD_TIME} seconds ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
+          
+          echo "📊 ccache statistics:"
+          ccache -s
+
+      - name: Build modules
+        run: |
+          echo "🔧 Building kernel modules..."
+          START_TIME=$(date +%s)
+          
+          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
+          
+          END_TIME=$(date +%s)
+          MODULE_TIME=$((END_TIME - START_TIME))
+          echo "⏰ Module build completed in ${MODULE_TIME} seconds ($((MODULE_TIME / 60))m $((MODULE_TIME % 60))s)"
+
+      - name: Build initrd with dracut
+        run: |
+          echo "🔧 Building initrd with dracut..."
+          
+          mkdir -p artifacts
+          
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          echo "Kernel version: ${KERNEL_VERSION}"
+          
+          MODULES_STAGING="$HOME/kernel-modules-staging"
+          echo "Installing already-built modules to staging directory..."
+          echo "Target directory: ${MODULES_STAGING}"
+          
+          KBUILD_BUILD_TIMESTAMP='' make INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
+          
+          MODULES_DIR="${MODULES_STAGING}/lib/modules/${KERNEL_VERSION}"
+          echo "Expected modules directory: ${MODULES_DIR}"
+          
+          if [ ! -d "${MODULES_DIR}" ]; then
+            echo "❌ Modules directory not found: ${MODULES_DIR}"
+            exit 1
+          fi
+          
+          echo "✅ Modules installed successfully:"
+          echo "  - Module count: $(find "${MODULES_DIR}" -name "*.ko" | wc -l)"
+          echo "  - Directory size: $(du -sh "${MODULES_DIR}" | cut -f1)"
+          
+          echo "Creating portable initrd with dracut..."
+          AWS_DRIVERS="ena virtio_net virtio_blk nvme ixgbevf virtio_scsi"
+          
+          echo "Including AWS/cloud drivers: ${AWS_DRIVERS}"
+          dracut --no-hostonly \
+                 --kmoddir "${MODULES_DIR}" \
+                 --add-drivers "${AWS_DRIVERS}" \
+                 --force \
+                 "artifacts/initrd.img" \
+                 "${KERNEL_VERSION}"
+          
+          if [ -f "artifacts/initrd.img" ]; then
+            echo "✅ Initrd created successfully:"
+            echo "  - Size: $(du -h artifacts/initrd.img | cut -f1)"
+            sha256sum artifacts/initrd.img > artifacts/initrd.sha256
+            echo "  - SHA256: $(cat artifacts/initrd.sha256)"
+          else
+            echo "❌ Failed to create initrd"
+            exit 1
+          fi
+
+      - name: Prepare kernel artifacts
+        run: |
+          echo "📦 Preparing kernel artifacts..."
+          mkdir -p artifacts
+          
+          if [ -f "arch/x86/boot/bzImage" ]; then
+            cp arch/x86/boot/bzImage artifacts/
+            echo "✅ bzImage: $(du -h arch/x86/boot/bzImage | cut -f1)"
+          fi
+          
+          if [ -f "vmlinux" ]; then
+            cp vmlinux artifacts/
+            echo "✅ vmlinux: $(du -h vmlinux | cut -f1)"
+          fi
+          
+          if [ -f "System.map" ]; then
+            cp System.map artifacts/
+            echo "✅ System.map: $(du -h System.map | cut -f1)"
+          fi
+          
+          cp .config artifacts/kernel-config
+          
+          if [ "$(find . -name "*.ko" | wc -l)" -gt 0 ]; then
+            echo "📦 Creating modules archive..."
+            find . -name "*.ko" -exec cp --parents {} artifacts/ \;
+            MODULE_COUNT=$(find artifacts -name "*.ko" | wc -l)
+            echo "✅ Modules archived: $MODULE_COUNT"
+          fi
+          
+          cat > artifacts/build-summary.txt << EOF
+          Linux Kernel Build Summary
+          =========================
+          Build Date: $(date)
+          Build Type: ${{ inputs.build-type || 'localmod' }}
+          Build Instance Type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}
+          Test Instance Type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
+          Debug Features: ${{ inputs.enable-debug || 'false' }}
+          
+          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          Compiler: $(gcc --version | head -1)
+          
+          Configuration Stats:
+          - Total modules: $(grep -c "=m$" .config || echo 0)
+          - Built-in features: $(grep -c "=y$" .config || echo 0)
+          - Disabled features: $(grep -c "is not set$" .config || echo 0)
+          
+          Build Performance:
+          - Runner CPUs: $(nproc)
+          - Parallel jobs: $(($(nproc) + 1))
+          
+          ccache Statistics:
+          $(ccache -s)
+          EOF
+          
+          echo "📋 Artifact summary:"
+          ls -la artifacts/
+          echo ""
+          echo "Total artifact size: $(du -sh artifacts | cut -f1)"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-kernel-${{ inputs.build-type || 'localmod' }}-${{ inputs.build-instance-type || 'm7i.metal-24xl' }}-${{ github.sha }}
+          path: artifacts/
+          retention-days: 14
+          compression-level: 6
+
+      - name: Upload build logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs-${{ inputs.build-type || 'localmod' }}-${{ github.sha }}
+          path: build.log
+          retention-days: 14
+
+      - name: Generate release information
+        id: release_info
+        run: |
+          echo "🚀 Preparing release information..."
+          
+          RELEASE_TAG="resctrl-perf-$(date -u +%Y%m%d-%H%M%S)"
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          
+          echo "📋 Release details:"
+          echo "  Tag: $RELEASE_TAG"
+          echo "  Kernel version: $KERNEL_VERSION"
+          echo "  Build type: ${{ inputs.build-type || 'localmod' }}"
+          echo "  Build instance type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}"
+          echo "  Test instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo "  Image type: ${{ inputs.image-type || 'ubuntu-24.04' }}"
+          
+          cat > release-notes.md << EOF
+          # Resctrl PMU Kernel Build - $RELEASE_TAG
+          
+          Custom Linux kernel build with resctrl PMU support for cache occupancy monitoring via perf counters.
+          
+          ## Build Information
+          - **Kernel Version**: $KERNEL_VERSION
+          - **Build Type**: ${{ inputs.build-type || 'localmod' }}
+          - **Build Instance**: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}
+          - **Test Instance**: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          - **Target Image**: ${{ inputs.image-type || 'ubuntu-24.04' }}
+          - **Git Commit**: ${{ github.sha }}
+          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Assets Included
+          - **bzImage**: Bootable kernel image
+          - **vmlinux**: Uncompressed kernel image (for debugging)
+          - **System.map**: Kernel symbol map
+          - **initrd.img**: Initial ramdisk with AWS/cloud drivers
+          - **initrd.sha256**: SHA256 checksum for initrd verification
+          - **kernel-config**: Kernel configuration used for this build
+          - **build-summary.txt**: Detailed build information and statistics
+          - **resctrl_tests**: Compiled test binary for resctrl functionality
+          - **modules archive**: All kernel modules (if any were built)
+          
+          ## Test Results
+          This kernel will be automatically tested on EC2 instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          EOF
+          
+          if [ "$(find artifacts -name "*.ko" 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "📦 Creating modules archive..."
+            cd artifacts
+            tar -czf "modules-${KERNEL_VERSION}.tar.gz" $(find . -name "*.ko")
+            cd ..
+            echo "✅ modules archive created: modules-${KERNEL_VERSION}.tar.gz"
+          fi
+          
+          echo "🧪 Building resctrl tests for release..."
+          if [ -d "tools/testing/selftests/resctrl" ]; then
+            cd tools/testing/selftests/resctrl
+            make clean && make
+            if [ -f "resctrl_tests" ]; then
+              cp resctrl_tests ../../../../artifacts/
+              echo "✅ resctrl_tests built"
+            else
+              echo "⚠️ resctrl_tests build failed"
+            fi
+            cd ../../../..
+          else
+            echo "⚠️ resctrl test directory not found"
+          fi
+          
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "release_name=Resctrl PMU Kernel - $KERNEL_VERSION" >> $GITHUB_OUTPUT
+          echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.release_info.outputs.release_tag }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          bodyFile: release-notes.md
+          artifacts: |
+            artifacts/bzImage
+            artifacts/vmlinux
+            artifacts/System.map
+            artifacts/kernel-config
+            artifacts/build-summary.txt
+            artifacts/initrd.img
+            artifacts/initrd.sha256
+            artifacts/modules-*.tar.gz
+            artifacts/resctrl_tests
+          artifactErrorsFailBuild: false
+          makeLatest: true
+          token: ${{ github.token }}
+
+      - name: Build completion summary
+        run: |
+          echo ""
+          echo "🎯 KERNEL BUILD COMPLETED SUCCESSFULLY!"
+          echo "======================================"
+          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
+          echo "✅ Build type: ${{ inputs.build-type || 'localmod' }}"
+          echo "✅ GitHub release created: ${{ steps.release_info.outputs.release_tag }}"
+          echo ""
+          echo "📦 Now proceeding to test on EC2 instance..."
+          echo ""
+
+  start-initial-runner:
+    name: Start EC2 runner for testing
+    runs-on: ubuntu-latest
+    needs: build-kernel
+    outputs:
+      runner-label: ${{ steps.start-runner.outputs.runner-label }}
+      ec2-instance-id: ${{ steps.start-runner.outputs.ec2-instance-id }}
+      region: ${{ steps.start-runner.outputs.region }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Start AWS Runner
+        id: start-runner
+        uses: ./.github/actions/aws-runner
+        with:
+          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          iam-role-name: github-actions-runner
+          instance-type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
+          volume-size: '20'
+          packages: '["kexec-tools", "curl", "jq", "gh"]'
+
+  setup-and-kexec:
+    name: Setup and kexec into custom kernel
+    runs-on: ${{ needs.start-initial-runner.outputs.runner-label }}
+    needs: [build-kernel, start-initial-runner]
+    timeout-minutes: 2
+    outputs:
+      custom-runner-label: ${{ steps.prepare-kexec.outputs.custom-runner-label }}
+      kexec-status: ${{ steps.execute-kexec.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: System information
+        run: |
+          echo "=== System Information ==="
+          echo "Hostname: $(hostname)"
+          echo "Kernel: $(uname -r)"
+          echo "Instance type: ${{ inputs.instance-type }}"
+          echo "GitHub Runner: $(whoami)@$(hostname)"
+          echo "Working directory: $(pwd)"
+          echo "Release to test: ${{ needs.build-kernel.outputs.release-tag }}"
+          echo "=========================="
+          
+      - name: Download kernel artifacts from specific release
+        id: download-kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "📦 Downloading kernel artifacts from release: ${{ needs.build-kernel.outputs.release-tag }}"
+          
+          RELEASE_TAG="${{ needs.build-kernel.outputs.release-tag }}"
+          
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "❌ No release tag provided from build job"
+            exit 1
+          fi
+          
+          echo "Using specific release: $RELEASE_TAG"
+          echo "release-tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          
+          mkdir -p /tmp/kernel
+          cd /tmp/kernel
+          
+          echo "Downloading bzImage..."
+          if ! gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "bzImage" --output bzImage; then
+            echo "❌ Failed to download bzImage from release $RELEASE_TAG"
+            exit 1
+          fi
+          
+          echo "Downloading initrd.img..."
+          if ! gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "initrd.img" --output initrd.img; then
+            echo "❌ Failed to download initrd.img from release $RELEASE_TAG"
+            exit 1
+          fi
+          
+          echo "Checking for kernel modules archive..."
+          if gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "modules-*.tar.gz" 2>/dev/null; then
+            echo "✅ Kernel modules archive downloaded"
+            MODULES_ARCHIVE=$(ls modules-*.tar.gz | head -1)
+            echo "modules-archive=/tmp/kernel/$MODULES_ARCHIVE" >> $GITHUB_OUTPUT
+            
+            KERNEL_VERSION=$(echo "$MODULES_ARCHIVE" | sed 's/modules-\(.*\)\.tar\.gz/\1/')
+            echo "kernel-version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+            echo "Kernel version: $KERNEL_VERSION"
+          else
+            echo "⚠️ No kernel modules archive found"
+            echo "modules-archive=" >> $GITHUB_OUTPUT
+            echo "kernel-version=" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "✅ Kernel artifacts downloaded successfully from release $RELEASE_TAG"
+          ls -la /tmp/kernel/
+          
+      - name: Install kernel modules if available
+        run: |
+          if [[ -n "${{ steps.download-kernel.outputs.modules-archive }}" ]]; then
+            echo "📦 Installing kernel modules..."
+            
+            MODULES_ARCHIVE="${{ steps.download-kernel.outputs.modules-archive }}"
+            KERNEL_VERSION="${{ steps.download-kernel.outputs.kernel-version }}"
+            
+            mkdir -p "/lib/modules/$KERNEL_VERSION"
+            
+            echo "Extracting modules to /lib/modules/$KERNEL_VERSION..."
+            TEMP_DIR="/tmp/modules-extract"
+            mkdir -p "$TEMP_DIR"
+            tar -xzf "$MODULES_ARCHIVE" -C "$TEMP_DIR"
+            
+            if [ -d "$TEMP_DIR/artifacts" ]; then
+              cp -r "$TEMP_DIR"/artifacts/* "/lib/modules/$KERNEL_VERSION/"
+            else
+              cp -r "$TEMP_DIR"/* "/lib/modules/$KERNEL_VERSION/"
+            fi
+            
+            rm -rf "$TEMP_DIR"
+            
+            echo "Running depmod to generate module dependencies..."
+            depmod -a "$KERNEL_VERSION"
+            
+            MODULE_COUNT=$(find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | wc -l)
+            echo "✅ Installed $MODULE_COUNT kernel modules"
+            
+            echo "Sample of installed modules:"
+            find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | head -10
+          else
+            echo "⚠️ No kernel modules to install"
+          fi
+          
+      - name: Download and prepare GitHub runner
+        run: |
+          echo "📦 Downloading GitHub Actions runner..."
+          
+          mkdir -p /opt/actions-runner-custom
+          cd /opt/actions-runner-custom
+          
+          curl -L -o actions-runner.tar.gz \
+            "https://github.com/actions/runner/releases/download/v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
+          
+          tar xzf actions-runner.tar.gz
+          rm actions-runner.tar.gz
+          
+          echo "✅ GitHub Actions runner downloaded and extracted"
+          ls -la /opt/actions-runner-custom/
+          
+      - name: Prepare kexec and custom runner
+        id: prepare-kexec
+        run: |
+          echo "🚀 Preparing kexec and custom runner registration..."
+          
+          CUSTOM_LABEL="custom-kernel-${{ github.run_id }}-${{ github.run_number }}"
+          echo "Custom runner label: $CUSTOM_LABEL"
+          echo "custom-runner-label=$CUSTOM_LABEL" >> $GITHUB_OUTPUT
+          
+          echo "Getting registration token..."
+          chmod +x .github/scripts/runner-registration.sh
+          REGISTRATION_TOKEN=$(.github/scripts/runner-registration.sh get-token "${{ secrets.REPO_ADMIN_TOKEN }}")
+          
+          if [[ -z "$REGISTRATION_TOKEN" ]]; then
+            echo "❌ Failed to get registration token"
+            exit 1
+          fi
+          
+          echo "✅ Got registration token"
+          
+          cat > /opt/runner-config.sh << EOF
+          #!/bin/bash
+          export GITHUB_REPOSITORY="${{ github.repository }}"
+          export GITHUB_REPOSITORY_OWNER="${{ github.repository_owner }}"
+          export RUNNER_NAME="runner-$CUSTOM_LABEL"
+          export RUNNER_LABELS="self-hosted,Linux,X64,$CUSTOM_LABEL"
+          export REGISTRATION_TOKEN="$REGISTRATION_TOKEN"
+          export RUNNER_DIR="/opt/actions-runner-custom"
+          export TESTED_RELEASE="${{ needs.build-kernel.outputs.release-tag }}"
+          EOF
+          
+          chmod +x /opt/runner-config.sh
+          
+          cat > /etc/systemd/system/github-runner-register.service << 'EOF'
+          [Unit]
+          Description=GitHub Runner Registration after Kexec
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/register-and-start-runner.sh
+          StandardOutput=journal+console
+          StandardError=journal+console
+          TimeoutStartSec=300
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > /opt/register-and-start-runner.sh << 'SCRIPT'
+          #!/bin/bash
+          set -x
+          
+          echo "=== GitHub Runner Registration Script ==="
+          echo "Starting at $(date)"
+          
+          source /opt/runner-config.sh
+          
+          cd "$RUNNER_DIR"
+          export RUNNER_ALLOW_RUNASROOT=1
+          
+          echo "Registering runner: $RUNNER_NAME"
+          echo "Labels: $RUNNER_LABELS"
+          echo "Testing release: $TESTED_RELEASE"
+          
+          ./config.sh \
+            --url "https://github.com/$GITHUB_REPOSITORY" \
+            --token "$REGISTRATION_TOKEN" \
+            --name "$RUNNER_NAME" \
+            --labels "$RUNNER_LABELS" \
+            --work "_work" \
+            --unattended \
+            --replace
+          
+          if [[ $? -ne 0 ]]; then
+            echo "❌ Failed to register runner"
+            exit 1
+          fi
+          
+          echo "✅ Runner registered successfully"
+          
+          echo "Starting runner..."
+          nohup ./run.sh > /var/log/github-runner.log 2>&1 &
+          
+          echo "✅ Runner started with PID: $!"
+          echo "=== Registration Script Complete ==="
+          SCRIPT
+          
+          chmod +x /opt/register-and-start-runner.sh
+          
+          systemctl enable github-runner-register.service
+          
+          echo "✅ Post-kexec runner registration prepared"
+          
+      - name: Configure and execute kexec
+        id: execute-kexec
+        run: |
+          echo "🚀 Configuring kexec with custom kernel..."
+          
+          KERNEL="/tmp/kernel/bzImage"
+          INITRD="/tmp/kernel/initrd.img"
+          
+          CMDLINE=$(cat /proc/cmdline)
+          echo "Current cmdline: $CMDLINE"
+          
+          ENHANCED_CMDLINE="$CMDLINE systemd.mask=multipathd.service loglevel=4"
+          echo "Enhanced cmdline: $ENHANCED_CMDLINE"
+          
+          echo "Loading kernel for kexec..."
+          if ! kexec -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
+            echo "❌ Failed to load kernel for kexec"
+            exit 1
+          fi
+          
+          echo "✅ Kernel loaded successfully"
+          
+          echo "${{ github.run_id }}" > /opt/kexec-marker
+          echo "${{ needs.build-kernel.outputs.release-tag }}" > /opt/tested-release
+          
+          cat > /etc/systemd/system/perform-kexec.service << 'EOF'
+          [Unit]
+          Description=Perform kexec to custom kernel
+          DefaultDependencies=no
+          After=basic.target
+
+          [Service]
+          Type=forking
+          ExecStart=/bin/bash -c 'nohup bash -c "sleep 15 && echo Executing kexec now... >> /var/log/kexec-setup.log && sync && kexec -e" </dev/null >/dev/null 2>&1 & echo $! > /var/run/kexec.pid'
+          PIDFile=/var/run/kexec.pid
+          StandardOutput=journal+console
+          StandardError=journal+console
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          echo "🚀 Starting kexec service..."
+          systemctl daemon-reload
+          systemctl start --no-block perform-kexec.service
+          
+          sleep 1
+          
+          echo "Service status:"
+          systemctl status perform-kexec.service --no-pager || true
+          
+          echo "status=kexec-initiated" >> $GITHUB_OUTPUT
+          
+          echo "✅ Kexec service started. The system will reboot into the custom kernel in 15 seconds."
+          echo "Job completing now to allow kexec to proceed..."
+          
+          exit 0
+
+  wait-for-custom-kernel:
+    name: Wait for custom kernel runner
+    runs-on: ubuntu-latest
+    needs: [setup-and-kexec, start-initial-runner, build-kernel]
+    timeout-minutes: 10
+    outputs:
+      runner-ready: ${{ steps.wait-runner.outputs.ready }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Wait for custom kernel runner to come online
+        id: wait-runner
+        run: |
+          echo "⏳ Waiting for custom kernel runner to come online..."
+          echo "Runner label: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}"
+          echo "Testing release: ${{ needs.build-kernel.outputs.release-tag }}"
+          
+          chmod +x .github/scripts/runner-registration.sh
+          
+          if .github/scripts/runner-registration.sh wait \
+            "${{ secrets.REPO_ADMIN_TOKEN }}" \
+            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" \
+            300 \
+            10; then
+            echo "✅ Custom kernel runner is online!"
+            echo "ready=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Timeout waiting for custom kernel runner"
+            echo "ready=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  pmu-test:
+    name: Run PMU tests on custom kernel
+    needs: [wait-for-custom-kernel, setup-and-kexec, build-kernel]
+    if: needs.wait-for-custom-kernel.outputs.runner-ready == 'true'
+    runs-on: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tools/testing/selftests/resctrl/
+          sparse-checkout-cone-mode: false
+      
+      - name: Verify custom kernel boot
+        run: |
+          echo "================================================"
+          echo "🚀 CUSTOM KERNEL SUCCESSFULLY BOOTED! 🚀"
+          echo "================================================"
+          echo ""
+          echo "📍 Kernel version: $(uname -r)"
+          echo "📍 Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
+          echo "⏰ System uptime: $(uptime)"
+          echo "📅 Date: $(date)"
+          echo ""
+          
+          if [[ -f /opt/kexec-marker ]]; then
+            echo "✅ Kexec marker found: $(cat /opt/kexec-marker)"
+          else
+            echo "⚠️ Kexec marker not found"
+          fi
+          
+          if [[ -f /opt/tested-release ]]; then
+            echo "✅ Testing release: $(cat /opt/tested-release)"
+          fi
+          
+          echo ""
+          echo "📊 GitHub runner service status:"
+          systemctl status github-runner-register.service --no-pager || true
+          
+      - name: Check resctrl support
+        run: |
+          echo "🔍 Checking resctrl support in custom kernel..."
+          
+          if [[ -d /sys/fs/resctrl ]]; then
+            echo "✅ /sys/fs/resctrl exists"
+            
+            if ! mount | grep -q resctrl; then
+              echo "Mounting resctrl filesystem..."
+              mount -t resctrl resctrl /sys/fs/resctrl || true
+            fi
+            
+            echo "📁 Contents of /sys/fs/resctrl:"
+            ls -la /sys/fs/resctrl/ || true
+            
+            if [[ -d /sys/fs/resctrl/info ]]; then
+              echo ""
+              echo "📊 Resctrl info:"
+              find /sys/fs/resctrl/info -type f | while read file; do
+                echo "📄 $file: $(cat "$file" 2>/dev/null || echo 'read error')"
+              done
+            fi
+          else
+            echo "❌ /sys/fs/resctrl not found"
+          fi
+          
+          echo ""
+          echo "🔧 Kernel configuration for resctrl:"
+          if [[ -f /proc/config.gz ]]; then
+            zcat /proc/config.gz | grep -E "(RESCTRL|RDT)" || echo "No resctrl config found"
+          else
+            echo "Kernel config not available"
+          fi
+          
+          echo ""
+          echo "📋 Kernel messages about resctrl:"
+          dmesg | grep -i resctrl | head -20 || echo "No resctrl messages"
+          
+      - name: Download test binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "📦 Downloading test binary from release: ${{ needs.build-kernel.outputs.release-tag }}"
+          
+          RELEASE_TAG="${{ needs.build-kernel.outputs.release-tag }}"
+          
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "❌ No release tag provided"
+            exit 1
+          fi
+          
+          echo "Downloading from release: $RELEASE_TAG"
+          
+          if gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "resctrl_tests" --output ./resctrl_tests; then
+            echo "✅ Test binary downloaded"
+            chmod +x ./resctrl_tests
+            ls -la ./resctrl_tests
+          else
+            echo "❌ Failed to download test binary from release $RELEASE_TAG"
+            exit 1
+          fi
+          
+      - name: Run PMU test
+        run: |
+          echo "🧪 Running resctrl PMU test..."
+          echo "Testing kernel from release: ${{ needs.build-kernel.outputs.release-tag }}"
+          
+          ./resctrl_tests -t pmu || echo "⚠️ PMU test completed with status: $?"
+          
+      - name: Capture test results
+        if: always()
+        run: |
+          echo "📊 Test Results Summary"
+          echo "======================="
+          echo "Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
+          echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
+          
+          echo ""
+          echo "🔍 Recent kernel messages:"
+          dmesg | tail -100
+          
+          echo ""
+          echo "🎯 PMU-related kernel messages:"
+          dmesg | grep -i -E "(pmu|perf|resctrl|rdt)" | tail -50 || echo "No PMU messages"
+
+  cleanup:
+    name: Cleanup runners and EC2 instance
+    needs: [start-initial-runner, setup-and-kexec, wait-for-custom-kernel, pmu-test, build-kernel]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Test summary
+        run: |
+          echo "📋 Build and Test Summary"
+          echo "========================="
+          echo "Release tested: ${{ needs.build-kernel.outputs.release-tag }}"
+          echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
+          echo "Test instance: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo ""
+      
+      - name: Remove custom kernel runner from GitHub
+        if: needs.setup-and-kexec.outputs.custom-runner-label
+        continue-on-error: true
+        run: |
+          echo "🧹 Removing custom kernel runner..."
+          
+          chmod +x .github/scripts/runner-registration.sh
+          .github/scripts/runner-registration.sh remove \
+            "${{ secrets.REPO_ADMIN_TOKEN }}" \
+            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" || true
+            
+          echo "✅ Custom kernel runner removed"
+      
+      - name: Stop AWS Runner
+        uses: ./.github/actions/aws-runner/cleanup
+        with:
+          runner-label: ${{ needs.start-initial-runner.outputs.runner-label }}
+          ec2-instance-id: ${{ needs.start-initial-runner.outputs.ec2-instance-id }}
+          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.start-initial-runner.outputs.region }}
