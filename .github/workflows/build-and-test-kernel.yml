@@ -122,15 +122,14 @@ jobs:
         run: |
           echo "📊 Generating configuration hash for cache key..."
           CONFIG_HASH="none"
-          # For out-of-tree builds, config should be in build dir or temp location
+          # Config might not exist yet if this runs before extraction
+          # Will be in build directory after extraction step
           if [ -f "$BUILD_DIR/.config" ]; then
             CONFIG_HASH=$(sha256sum "$BUILD_DIR/.config" | cut -d' ' -f1 | cut -c1-16)
             echo "✅ Config hash from build dir: $CONFIG_HASH"
-          elif [ -f "/tmp/extracted.config" ]; then
-            CONFIG_HASH=$(sha256sum /tmp/extracted.config | cut -d' ' -f1 | cut -c1-16)
-            echo "✅ Config hash from extracted: $CONFIG_HASH"
           else
-            echo "⚠️ No config yet, will compute after configuration"
+            echo "⚠️ No config yet in build directory, using 'pending' hash"
+            CONFIG_HASH="pending"
           fi
           echo "config-hash=$CONFIG_HASH" >> $GITHUB_OUTPUT
 
@@ -209,13 +208,17 @@ jobs:
         if: inputs.build-type == 'localmod' || !inputs.build-type
         run: |
           echo "🔍 Extracting localmodconfig artifact..."
+          echo "Build directory: $BUILD_DIR"
           if [ -f "./localmod-artifacts/localmod-config.tar.gz" ]; then
             cd localmod-artifacts
             tar -xzf localmod-config.tar.gz
             if [ -f "localmod-config/current-config" ]; then
               echo "✅ Found localmodconfig base configuration"
-              # Don't put .config in source tree for out-of-tree builds
-              cp localmod-config/current-config /tmp/extracted.config
+              # Save config directly to build directory for out-of-tree builds
+              mkdir -p "$BUILD_DIR"
+              cp localmod-config/current-config "$BUILD_DIR/.config"
+              echo "📁 Config saved to: $BUILD_DIR/.config"
+              echo "📊 Config stats: $(wc -l "$BUILD_DIR/.config" | cut -d' ' -f1) lines"
               echo "📋 Module information available:"
               if [ -f "localmod-config/loaded-module-names.txt" ]; then
                 echo "  - Loaded modules: $(wc -l < localmod-config/loaded-module-names.txt)"
@@ -231,20 +234,6 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure clean source tree
-        run: |
-          echo "🧹 Ensuring source tree is clean for out-of-tree build..."
-          # The source tree must be completely clean for out-of-tree builds
-          # Remove any .config or build artifacts from source tree
-          if [ -f ".config" ]; then
-            echo "Removing .config from source tree (will use build directory instead)"
-            rm -f .config
-          fi
-          if [ -f "include/config/auto.conf" ] || [ -f "include/generated/autoconf.h" ]; then
-            echo "Found generated files, cleaning source tree..."
-            make mrproper
-          fi
-          echo "✅ Source tree is clean"
 
       - name: Configure kernel
         run: |
@@ -259,17 +248,15 @@ jobs:
             make O="$BUILD_DIR" defconfig
           else
             echo "Using localmodconfig (optimized for target hardware)"
-            # Check if config exists in build directory (from cache) or needs to be copied
-            if [ ! -f "$BUILD_DIR/.config" ]; then
-              if [ -f "/tmp/extracted.config" ]; then
-                echo "Copying extracted config to build directory"
-                cp /tmp/extracted.config "$BUILD_DIR/.config"
-              else
-                echo "❌ ERROR: No config file found to use"
-                exit 1
-              fi
+            # Config should already be in build directory from extraction step
+            if [ -f "$BUILD_DIR/.config" ]; then
+              echo "✅ Using .config from build directory"
+              echo "Config size: $(wc -l < "$BUILD_DIR/.config") lines"
             else
-              echo "Using existing .config from cached build directory"
+              echo "❌ ERROR: No .config file found in build directory"
+              echo "Build directory contents:"
+              ls -la "$BUILD_DIR/" || true
+              exit 1
             fi
             KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           fi
