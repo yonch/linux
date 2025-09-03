@@ -67,6 +67,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Setup build directory
+        run: |
+          echo "🔧 Setting up out-of-tree build directory..."
+          BUILD_DIR="/tmp/kernel-build"
+          mkdir -p "$BUILD_DIR"
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          echo "✅ Build directory created: $BUILD_DIR"
+          echo "📍 Source directory: $(pwd)"
+          echo "📍 Build directory: $BUILD_DIR"
+          echo ""
+
       - name: Cache and install build dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -105,6 +116,53 @@ jobs:
           echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
           ccache -s
           ccache -z
+
+      - name: Generate config hash for caching
+        id: config-hash
+        run: |
+          echo "📊 Generating configuration hash for cache key..."
+          CONFIG_HASH="none"
+          if [ -f ".config" ]; then
+            CONFIG_HASH=$(sha256sum .config | cut -d' ' -f1 | cut -c1-16)
+            echo "✅ Config hash: $CONFIG_HASH"
+          else
+            echo "⚠️ No config yet, will compute after configuration"
+          fi
+          echo "config-hash=$CONFIG_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache build directory
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: /tmp/kernel-build
+          key: kernel-build-v2-${{ github.sha }}-${{ inputs.build-type || 'localmod' }}-${{ steps.config-hash.outputs.config-hash }}
+          restore-keys: |
+            kernel-build-v2-${{ github.sha }}-${{ inputs.build-type || 'localmod' }}-
+            kernel-build-v2-${{ github.sha }}-
+            kernel-build-v2-
+
+      - name: Report cache status
+        run: |
+          echo "📊 Cache Status Report"
+          echo "====================="
+          echo "🔧 ccache statistics (before build):"
+          ccache -s | grep -E "cache hit|cache miss|cache size" || true
+          echo ""
+          echo "📦 Build directory cache:"
+          if [ "${{ steps.cache-build.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ Cache HIT - using cached build directory"
+            echo "🚀 This should significantly speed up the build!"
+            if [ -d "$BUILD_DIR" ]; then
+              echo "📁 Cached build directory contents:"
+              echo "  - Total size: $(du -sh $BUILD_DIR | cut -f1)"
+              echo "  - Object files: $(find $BUILD_DIR -name "*.o" 2>/dev/null | wc -l)"
+              echo "  - Command files: $(find $BUILD_DIR -name "*.cmd" 2>/dev/null | wc -l)"
+            fi
+          else
+            echo "❌ Cache MISS - starting fresh build"
+            echo "📝 Note: First build will populate the cache for future runs"
+          fi
+          echo ""
           
           if [ -d "$BUILD_DIR/.config" ]; then
             echo "✅ Build directory cache hit - found existing build artifacts"
@@ -239,6 +297,7 @@ jobs:
           
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
+          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           echo "⏰ Build completed in ${BUILD_TIME} seconds ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
           
           echo "📊 ccache statistics:"
@@ -253,6 +312,7 @@ jobs:
           
           END_TIME=$(date +%s)
           MODULE_TIME=$((END_TIME - START_TIME))
+          echo "MODULE_TIME=${MODULE_TIME}" >> $GITHUB_ENV
           echo "⏰ Module build completed in ${MODULE_TIME} seconds ($((MODULE_TIME / 60))m $((MODULE_TIME % 60))s)"
 
       - name: Build initrd with dracut
@@ -308,26 +368,37 @@ jobs:
           echo "📦 Preparing kernel artifacts..."
           mkdir -p artifacts
           
-          if [ -f "arch/x86/boot/bzImage" ]; then
-            cp arch/x86/boot/bzImage artifacts/
-            echo "✅ bzImage: $(du -h arch/x86/boot/bzImage | cut -f1)"
+          # Copy kernel images from build directory
+          if [ -f "$BUILD_DIR/arch/x86/boot/bzImage" ]; then
+            cp "$BUILD_DIR/arch/x86/boot/bzImage" artifacts/
+            echo "✅ bzImage: $(du -h "$BUILD_DIR/arch/x86/boot/bzImage" | cut -f1)"
+          else
+            echo "⚠️ bzImage not found in $BUILD_DIR/arch/x86/boot/"
           fi
           
-          if [ -f "vmlinux" ]; then
-            cp vmlinux artifacts/
-            echo "✅ vmlinux: $(du -h vmlinux | cut -f1)"
+          if [ -f "$BUILD_DIR/vmlinux" ]; then
+            cp "$BUILD_DIR/vmlinux" artifacts/
+            echo "✅ vmlinux: $(du -h "$BUILD_DIR/vmlinux" | cut -f1)"
+          else
+            echo "⚠️ vmlinux not found in $BUILD_DIR"
           fi
           
-          if [ -f "System.map" ]; then
-            cp System.map artifacts/
-            echo "✅ System.map: $(du -h System.map | cut -f1)"
+          if [ -f "$BUILD_DIR/System.map" ]; then
+            cp "$BUILD_DIR/System.map" artifacts/
+            echo "✅ System.map: $(du -h "$BUILD_DIR/System.map" | cut -f1)"
+          else
+            echo "⚠️ System.map not found in $BUILD_DIR"
           fi
           
-          cp .config artifacts/kernel-config
+          # Copy config from build directory
+          cp "$BUILD_DIR/.config" artifacts/kernel-config
           
-          if [ "$(find . -name "*.ko" | wc -l)" -gt 0 ]; then
+          # Archive modules from build directory
+          if [ "$(find "$BUILD_DIR" -name "*.ko" | wc -l)" -gt 0 ]; then
             echo "📦 Creating modules archive..."
-            find . -name "*.ko" -exec cp --parents {} artifacts/ \;
+            cd "$BUILD_DIR"
+            find . -name "*.ko" -exec cp --parents {} "$GITHUB_WORKSPACE/artifacts/" \;
+            cd "$GITHUB_WORKSPACE"
             MODULE_COUNT=$(find artifacts -name "*.ko" | wc -l)
             echo "✅ Modules archived: $MODULE_COUNT"
           fi
@@ -342,7 +413,7 @@ jobs:
           Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Debug Features: ${{ inputs.enable-debug || 'false' }}
           
-          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           Compiler: $(gcc --version | head -1)
           
           Configuration Stats:
@@ -385,7 +456,7 @@ jobs:
           echo "🚀 Preparing release information..."
           
           RELEASE_TAG="resctrl-perf-$(date -u +%Y%m%d-%H%M%S)"
-          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           
           echo "📋 Release details:"
           echo "  Tag: $RELEASE_TAG"
@@ -477,9 +548,29 @@ jobs:
           echo ""
           echo "🎯 KERNEL BUILD COMPLETED SUCCESSFULLY!"
           echo "======================================"
-          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
+          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make O=\"$BUILD_DIR\" CC=\"ccache gcc\" kernelrelease)"
           echo "✅ Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "✅ GitHub release created: ${{ steps.release_info.outputs.release_tag }}"
+          echo ""
+          echo "📊 CACHE PERFORMANCE METRICS"
+          echo "============================"
+          echo "🔧 ccache final statistics:"
+          ccache -s | grep -E "Hits:|Misses:|Hit rate:" || ccache -s | grep -E "cache hit|cache miss|Primary storage"
+          echo ""
+          echo "📦 Build directory cache:"
+          if [ "${{ steps.cache-build.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ Cache was HIT - saved significant build time"
+          else
+            echo "📝 Cache was MISS - populated for next build"
+          fi
+          echo "Build directory size: $(du -sh $BUILD_DIR | cut -f1)"
+          echo ""
+          echo "⏱️ Build time impact:"
+          echo "  - Kernel build: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
+          echo "  - Module build: $((MODULE_TIME / 60))m $((MODULE_TIME % 60))s" 
+          echo "  - Total build: $(( (BUILD_TIME + MODULE_TIME) / 60 ))m $(( (BUILD_TIME + MODULE_TIME) % 60 ))s"
+          echo ""
+          echo "💡 Tip: Incremental builds with cache hits can be 70-90% faster!"
           echo ""
           echo "📦 Now proceeding to test on EC2 instance..."
           echo ""
