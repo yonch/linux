@@ -211,7 +211,6 @@ static void resctrl_event_update(struct perf_event *event)
 
 	/* Setup rmid_read structure with current parameters */
 	rr = resctrl_event->rr;
-	rr.cpu = smp_processor_id();
 	rr.val = 0;
 	rr.err = 0;
 
