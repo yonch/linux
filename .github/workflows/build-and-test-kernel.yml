@@ -1021,7 +1021,7 @@ jobs:
           echo "🧪 Running resctrl PMU test..."
           echo "Testing kernel from release: ${{ needs.build-kernel.outputs.release-tag }}"
           
-          ./resctrl_tests -t pmu || echo "⚠️ PMU test completed with status: $?"
+          ./resctrl_tests -t pmu
           
       - name: Capture test results
         if: always()
