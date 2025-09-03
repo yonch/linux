@@ -5,7 +5,7 @@ on:
       instance-type:
         description: 'EC2 instance type for testing'
         required: false
-        default: 'm7i.xlarge'
+        default: 'm7i.metal-24xl'
         type: string
       build-instance-type:
         description: 'Instance type used for localmodconfig'
@@ -52,7 +52,7 @@ jobs:
           echo "================================================"
           echo ""
           echo "📍 Build instance type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}"
-          echo "📍 Test instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo "📍 Test instance type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
           echo "📍 Target image: ${{ inputs.image-type || 'ubuntu-24.04' }}"
           echo "📍 Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "📍 Debug features: ${{ inputs.enable-debug || 'false' }}"
@@ -73,12 +73,28 @@ jobs:
           packages: build-essential ccache bc kmod cpio flex bison libelf-dev libssl-dev dwarves zstd dracut-core
           version: 1.0
 
+      - name: Setup build directory
+        run: |
+          echo "📁 Setting up out-of-tree build directory..."
+          BUILD_DIR="/tmp/kernel-build"
+          mkdir -p "$BUILD_DIR"
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          echo "Build directory: $BUILD_DIR"
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: kernel-build-${{ inputs.build-type || 'localmod' }}
+          key: ccache-${{ inputs.build-type || 'localmod' }}
           max-size: 8G
           verbose: 2
+
+      - name: Cache build directory
+        uses: actions/cache@v4
+        with:
+          path: /tmp/kernel-build
+          key: build-dir-${{ inputs.build-type || 'localmod' }}-${{ github.sha }}
+          restore-keys: |
+            build-dir-${{ inputs.build-type || 'localmod' }}-
 
       - name: Configure ccache for kernel builds
         run: |
@@ -89,6 +105,13 @@ jobs:
           echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
           ccache -s
           ccache -z
+          
+          if [ -d "$BUILD_DIR/.config" ]; then
+            echo "✅ Build directory cache hit - found existing build artifacts"
+            ls -la "$BUILD_DIR" | head -10
+          else
+            echo "🔄 Build directory cache miss - starting fresh build"
+          fi
 
       - name: Find latest extract workflow run
         if: inputs.build-type == 'localmod' || !inputs.build-type
@@ -148,62 +171,71 @@ jobs:
       - name: Configure kernel
         run: |
           echo "🔧 Configuring kernel build..."
+          echo "Build directory: $BUILD_DIR"
           
           if [ "${{ inputs.build-type }}" = "tinyconfig" ]; then
             echo "Using tinyconfig (minimal kernel)"
-            make tinyconfig
+            make O="$BUILD_DIR" tinyconfig
           elif [ "${{ inputs.build-type }}" = "defconfig" ]; then
             echo "Using defconfig (default kernel config)"
-            make defconfig
+            make O="$BUILD_DIR" defconfig
           else
             echo "Using localmodconfig (optimized for target hardware)"
             if [ ! -f ".config" ]; then
               echo "❌ ERROR: No .config file found after localmodconfig extraction"
               exit 1
             fi
-            KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
+            # Copy config to build directory if not already there
+            if [ ! -f "$BUILD_DIR/.config" ]; then
+              cp .config "$BUILD_DIR/.config"
+              echo "Copied .config to build directory"
+            else
+              echo "Using existing .config from cached build directory"
+            fi
+            KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           fi
 
           echo "🚀 Applying build optimizations..."
-          scripts/config --enable CONFIG_TRIM_UNUSED_KSYMS
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_TRIM_UNUSED_KSYMS
           
           if [ "${{ inputs.enable-debug }}" != "true" ]; then
             echo "Disabling debug features for faster builds..."
-            scripts/config --disable CONFIG_DEBUG_INFO
-            scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
-            scripts/config --disable CONFIG_DEBUG_KERNEL
-            scripts/config --disable CONFIG_DEBUG_MISC
-            scripts/config --disable CONFIG_DEBUG_VM
-            scripts/config --disable CONFIG_DEBUG_PAGEALLOC
-            scripts/config --disable CONFIG_DEBUG_SLUB
-            scripts/config --disable CONFIG_LOCKDEP
-            scripts/config --disable CONFIG_PROVE_LOCKING
-            scripts/config --disable CONFIG_DEBUG_LOCK_ALLOC
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_INFO
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_KERNEL
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_MISC
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_VM
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_PAGEALLOC
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_SLUB
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_LOCKDEP
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_PROVE_LOCKING
+            scripts/config --file "$BUILD_DIR/.config" --disable CONFIG_DEBUG_LOCK_ALLOC
           fi
           
-          scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
-          scripts/config --enable CONFIG_MODULES
-          scripts/config --enable CONFIG_MODULE_UNLOAD
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MODULES
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MODULE_UNLOAD
           
           echo "🔧 Clearing Debian-specific certificate paths..."
-          scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
-          scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+          scripts/config --file "$BUILD_DIR/.config" --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+          scripts/config --file "$BUILD_DIR/.config" --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
           
-          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" olddefconfig
+          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           
           echo "📋 Final kernel configuration:"
-          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make CC=\"ccache gcc\" kernelrelease)"
-          echo "  - Modules enabled: $(grep -c "=m$" .config || echo 0)"
-          echo "  - Built-in features: $(grep -c "=y$" .config || echo 0)"
-          echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" .config || echo 0)"
+          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC=\"ccache gcc\" kernelrelease)"
+          echo "  - Modules enabled: $(grep -c "=m$" "$BUILD_DIR/.config" || echo 0)"
+          echo "  - Built-in features: $(grep -c "=y$" "$BUILD_DIR/.config" || echo 0)"
+          echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" "$BUILD_DIR/.config" || echo 0)"
 
       - name: Build kernel
         run: |
           echo "🔨 Starting kernel build..."
           echo "Using $(nproc) CPU cores for parallel compilation"
+          echo "Build directory: $BUILD_DIR"
           
           START_TIME=$(date +%s)
-          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
+          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" -j$(($(nproc) + 1)) 2>&1 | tee build.log
           
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
@@ -217,7 +249,7 @@ jobs:
           echo "🔧 Building kernel modules..."
           START_TIME=$(date +%s)
           
-          KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
+          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
           
           END_TIME=$(date +%s)
           MODULE_TIME=$((END_TIME - START_TIME))
@@ -229,14 +261,14 @@ jobs:
           
           mkdir -p artifacts
           
-          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make CC="ccache gcc" kernelrelease)
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           echo "Kernel version: ${KERNEL_VERSION}"
           
           MODULES_STAGING="$HOME/kernel-modules-staging"
           echo "Installing already-built modules to staging directory..."
           echo "Target directory: ${MODULES_STAGING}"
           
-          KBUILD_BUILD_TIMESTAMP='' make INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
+          KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" INSTALL_MOD_PATH="${MODULES_STAGING}" INSTALL_MOD_STRIP=1 CC="ccache gcc" modules_install
           
           MODULES_DIR="${MODULES_STAGING}/lib/modules/${KERNEL_VERSION}"
           echo "Expected modules directory: ${MODULES_DIR}"
@@ -306,7 +338,7 @@ jobs:
           Build Date: $(date)
           Build Type: ${{ inputs.build-type || 'localmod' }}
           Build Instance Type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}
-          Test Instance Type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          Test Instance Type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Debug Features: ${{ inputs.enable-debug || 'false' }}
           
@@ -360,7 +392,7 @@ jobs:
           echo "  Kernel version: $KERNEL_VERSION"
           echo "  Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "  Build instance type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}"
-          echo "  Test instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo "  Test instance type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
           echo "  Image type: ${{ inputs.image-type || 'ubuntu-24.04' }}"
           
           cat > release-notes.md << EOF
@@ -372,7 +404,7 @@ jobs:
           - **Kernel Version**: $KERNEL_VERSION
           - **Build Type**: ${{ inputs.build-type || 'localmod' }}
           - **Build Instance**: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}
-          - **Test Instance**: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          - **Test Instance**: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           - **Target Image**: ${{ inputs.image-type || 'ubuntu-24.04' }}
           - **Git Commit**: ${{ github.sha }}
           - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -389,7 +421,7 @@ jobs:
           - **modules archive**: All kernel modules (if any were built)
           
           ## Test Results
-          This kernel will be automatically tested on EC2 instance type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          This kernel will be automatically tested on EC2 instance type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           EOF
           
           if [ "$(find artifacts -name "*.ko" 2>/dev/null | wc -l)" -gt 0 ]; then
@@ -475,7 +507,7 @@ jobs:
           github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           iam-role-name: github-actions-runner
-          instance-type: ${{ inputs.instance-type || 'm7i.xlarge' }}
+          instance-type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
           image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
           volume-size: '20'
           packages: '["kexec-tools", "curl", "jq", "gh"]'
@@ -943,7 +975,7 @@ jobs:
           echo "========================="
           echo "Release tested: ${{ needs.build-kernel.outputs.release-tag }}"
           echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
-          echo "Test instance: ${{ inputs.instance-type || 'm7i.xlarge' }}"
+          echo "Test instance: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
           echo ""
       
       - name: Remove custom kernel runner from GitHub
