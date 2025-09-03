@@ -414,13 +414,45 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		goto cleanup_group;
 	}
 
+	/* Additional reads to verify stability */
+	unsigned long resctrl_occupancy2, pmu_occupancy2;
+	
+	/* Read from resctrl again to check if PMU read affected it */
+	if (read_llc_occupancy_from_resctrl(group_name, &resctrl_occupancy2) < 0) {
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+	
+	/* Read from PMU again to check if resctrl read affected it */
+	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &pmu_occupancy2) < 0) {
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+
 	/* Wait for child to complete */
 	waitpid(child_pid, NULL, 0);
 
 	/* Print results */
 	ksft_print_msg("LLC Occupancy Results:\n");
-	ksft_print_msg("  Resctrl FS: %lu bytes\n", resctrl_occupancy);
-	ksft_print_msg("  PMU:        %lu bytes\n", pmu_occupancy);
+	ksft_print_msg("  Initial reads:\n");
+	ksft_print_msg("    Resctrl FS: %lu bytes\n", resctrl_occupancy);
+	ksft_print_msg("    PMU:        %lu bytes\n", pmu_occupancy);
+	ksft_print_msg("  Second reads (stability check):\n");
+	ksft_print_msg("    Resctrl FS: %lu bytes\n", resctrl_occupancy2);
+	ksft_print_msg("    PMU:        %lu bytes\n", pmu_occupancy2);
+
+	/* Check stability - values should not change between consecutive reads */
+	if (resctrl_occupancy != resctrl_occupancy2) {
+		ksft_print_msg("WARNING: Resctrl values changed between reads: %lu -> %lu\n",
+			       resctrl_occupancy, resctrl_occupancy2);
+	}
+	
+	if (pmu_occupancy != pmu_occupancy2) {
+		ksft_print_msg("WARNING: PMU values changed between reads: %lu -> %lu\n",
+			       pmu_occupancy, pmu_occupancy2);
+	}
 
 	/* Check if values are within expected range */
 	if (resctrl_occupancy < MIN_EXPECTED_OCCUPANCY || 

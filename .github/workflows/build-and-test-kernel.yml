@@ -67,6 +67,23 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Restore source file timestamps for cache efficiency
+        run: |
+          echo "🕐 Restoring file timestamps to prevent unnecessary rebuilds..."
+          echo "This is critical for utilizing cached build directories effectively"
+          
+          # For a kernel build, we need consistent timestamps between source and build cache
+          # Option 1: Set all source files to a fixed old timestamp (fast)
+          # This ensures source files are older than cached object files
+          
+          # Set all source files to Jan 1, 2024 (before any likely cache)
+          find . -type f -name "*.c" -o -name "*.h" -o -name "*.S" -o -name "Makefile" -o -name "Kconfig" | \
+            xargs -P$(nproc) touch -d "2024-01-01 00:00:00"
+          
+          echo "✅ Source file timestamps normalized to 2024-01-01"
+          echo "📝 This ensures cached object files appear newer than source files"
+          echo "⚡ Make will skip rebuilding unchanged files"
+
       - name: Setup build directory
         run: |
           echo "🔧 Setting up out-of-tree build directory..."
