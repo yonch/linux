@@ -133,11 +133,15 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 {
 	uint32_t *initial_perm;
 	uint32_t *flush_perm;
-	struct timespec start, now;
+	struct timespec start, now, delay_ts;
 	size_t idx;
 	size_t iterations = 0;
 	uint8_t ready = 1;
 	size_t flush_size = (256 * MB) / sizeof(uint32_t);  /* 256MB array */
+	char path[512];
+	FILE *file;
+	char *line = NULL;
+	size_t len = 0;
 
 	/* Step 1: Generate initial permutation (not tracked by resctrl) */
 	initial_perm = malloc(n * sizeof(uint32_t));
@@ -178,6 +182,26 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
 		free(initial_perm);
 		exit(1);
+	}
+
+	/* Wait 100ms to ensure all measurements are set up */
+	ksft_print_msg("Child waiting 100ms after joining group...\n");
+	delay_ts.tv_sec = 0;
+	delay_ts.tv_nsec = 100 * 1000000;  /* 100ms */
+	nanosleep(&delay_ts, NULL);
+
+	/* Read and print the tasks file to verify we're in the group */
+	snprintf(path, sizeof(path), "%s/mon_groups/%s/tasks", RESCTRL_PATH, group_name);
+	file = fopen(path, "r");
+	if (file) {
+		ksft_print_msg("Child: Contents of %s:\n", path);
+		while (getline(&line, &len, file) > 0) {
+			ksft_print_msg("  Task PID: %s", line);
+		}
+		fclose(file);
+		free(line);
+	} else {
+		ksft_print_msg("Child: Failed to read tasks file at %s\n", path);
 	}
 
 	/* Signal parent that we're ready */
@@ -271,6 +295,62 @@ static int read_llc_occupancy_from_resctrl(const char *group_name, unsigned long
 	return ret;
 }
 
+static int read_mbm_from_resctrl(const char *group_name, unsigned long *mbm_total, unsigned long *mbm_local)
+{
+	char path[512];
+	FILE *file;
+	char *line = NULL;
+	size_t len = 0;
+	int ret = -1;
+
+	*mbm_total = 0;
+	*mbm_local = 0;
+
+	/* Try different domain IDs until we find one that exists */
+	for (int domain = 0; domain < 4; domain++) {
+		/* Read MBM total */
+		snprintf(path, sizeof(path), "%s/mon_groups/%s/mon_data/mon_L3_%02d/mbm_total_bytes",
+			 RESCTRL_PATH, group_name, domain);
+		
+		file = fopen(path, "r");
+		if (file) {
+			if (getline(&line, &len, file) > 0) {
+				*mbm_total = strtoul(line, NULL, 10);
+				ret = 0;
+			}
+			fclose(file);
+			free(line);
+			line = NULL;
+			len = 0;
+		}
+
+		/* Read MBM local */
+		snprintf(path, sizeof(path), "%s/mon_groups/%s/mon_data/mon_L3_%02d/mbm_local_bytes",
+			 RESCTRL_PATH, group_name, domain);
+		
+		file = fopen(path, "r");
+		if (file) {
+			if (getline(&line, &len, file) > 0) {
+				*mbm_local = strtoul(line, NULL, 10);
+				ret = 0;
+			}
+			fclose(file);
+			free(line);
+			line = NULL;
+			len = 0;
+		}
+
+		if (ret == 0)
+			break;
+	}
+	
+	if (ret < 0) {
+		ksft_print_msg("Failed to read MBM from resctrl\n");
+	}
+	
+	return ret;
+}
+
 static int read_llc_occupancy_from_pmu(int pmu_type, const char *group_name, 
 					unsigned long *occupancy)
 {
@@ -326,6 +406,96 @@ static int read_llc_occupancy_from_pmu(int pmu_type, const char *group_name,
 	return ret;
 }
 
+static int read_mbm_from_pmu(int pmu_type, const char *group_name, 
+			      unsigned long *mbm_total, unsigned long *mbm_local)
+{
+	struct perf_event_attr pe = {0};
+	char path[512];
+	int mon_fd_total = -1, mon_fd_local = -1;
+	int perf_fd_total = -1, perf_fd_local = -1;
+	int ret = -1;
+	int domain;
+
+	*mbm_total = 0;
+	*mbm_local = 0;
+
+	/* Find domain with MBM files */
+	for (domain = 0; domain < 4; domain++) {
+		snprintf(path, sizeof(path), "%s/mon_groups/%s/mon_data/mon_L3_%02d/mbm_total_bytes",
+			 RESCTRL_PATH, group_name, domain);
+		mon_fd_total = open(path, O_RDONLY);
+		if (mon_fd_total >= 0)
+			break;
+	}
+
+	if (mon_fd_total < 0) {
+		ksft_print_msg("Failed to open MBM total monitoring file for PMU\n");
+		return -1;
+	}
+
+	/* Open MBM local for same domain */
+	snprintf(path, sizeof(path), "%s/mon_groups/%s/mon_data/mon_L3_%02d/mbm_local_bytes",
+		 RESCTRL_PATH, group_name, domain);
+	mon_fd_local = open(path, O_RDONLY);
+	if (mon_fd_local < 0) {
+		ksft_print_msg("Failed to open MBM local monitoring file for PMU\n");
+		close(mon_fd_total);
+		return -1;
+	}
+
+	/* Setup perf event for MBM total */
+	memset(&pe, 0, sizeof(pe));
+	pe.type = pmu_type;
+	pe.config = mon_fd_total;
+	pe.size = sizeof(pe);
+	pe.disabled = 0;
+	pe.exclude_kernel = 0;
+	pe.exclude_hv = 0;
+
+	perf_fd_total = perf_event_open(&pe, -1, 0, -1, 0);
+	if (perf_fd_total < 0) {
+		ksft_print_msg("Failed to open perf event for MBM total: %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	/* Setup perf event for MBM local */
+	pe.config = mon_fd_local;
+	perf_fd_local = perf_event_open(&pe, -1, 0, -1, 0);
+	if (perf_fd_local < 0) {
+		ksft_print_msg("Failed to open perf event for MBM local: %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	/* Read counter values */
+	uint64_t value;
+	
+	if (read(perf_fd_total, &value, sizeof(value)) == sizeof(value)) {
+		*mbm_total = value;
+		ret = 0;
+	} else {
+		ksft_print_msg("Failed to read MBM total PMU counter\n");
+	}
+
+	if (read(perf_fd_local, &value, sizeof(value)) == sizeof(value)) {
+		*mbm_local = value;
+	} else {
+		ksft_print_msg("Failed to read MBM local PMU counter\n");
+		ret = -1;
+	}
+
+cleanup:
+	if (perf_fd_total >= 0)
+		close(perf_fd_total);
+	if (perf_fd_local >= 0)
+		close(perf_fd_local);
+	if (mon_fd_total >= 0)
+		close(mon_fd_total);
+	if (mon_fd_local >= 0)
+		close(mon_fd_local);
+	
+	return ret;
+}
+
 static int remove_monitoring_group(const char *group_name)
 {
 	char path[512];
@@ -351,7 +521,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	uint8_t ready;
 	struct timespec ts;
 
-	ksft_print_msg("Testing PMU LLC occupancy measurement\n");
+	ksft_print_msg("Testing PMU LLC occupancy measurement with debugging\n");
 
 	/* Find the resctrl PMU type */
 	pmu_type = find_pmu_type(RESCTRL_PMU_NAME);
@@ -407,64 +577,74 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	ksft_print_msg("Child process (PID %d) ready and added to monitoring group %s\n", 
 		       child_pid, group_name);
 
-	/* Wait 500ms for cache to be populated */
-	ts.tv_sec = 0;
-	ts.tv_nsec = PARENT_WAIT_MS * 1000000;
-	nanosleep(&ts, NULL);
-
-	/* Read LLC occupancy from resctrl filesystem */
-	if (read_llc_occupancy_from_resctrl(group_name, &resctrl_occupancy) < 0) {
-		kill(child_pid, SIGKILL);
-		waitpid(child_pid, NULL, 0);
-		goto cleanup_group;
-	}
-
-	/* Read LLC occupancy from PMU */
-	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &pmu_occupancy) < 0) {
-		kill(child_pid, SIGKILL);
-		waitpid(child_pid, NULL, 0);
-		goto cleanup_group;
-	}
-
-	/* Additional reads to verify stability */
-	unsigned long resctrl_occupancy2, pmu_occupancy2;
+	/* Perform periodic measurements every 100ms */
+	int measurement_count = 0;
+	int max_measurements = 5;  /* 5 measurements at 100ms intervals = 500ms total */
+	unsigned long periodic_llc_resctrl[5], periodic_llc_pmu[5];
+	unsigned long periodic_mbm_total_resctrl[5], periodic_mbm_local_resctrl[5];
+	unsigned long periodic_mbm_total_pmu[5], periodic_mbm_local_pmu[5];
 	
-	/* Read from resctrl again to check if PMU read affected it */
-	if (read_llc_occupancy_from_resctrl(group_name, &resctrl_occupancy2) < 0) {
-		kill(child_pid, SIGKILL);
-		waitpid(child_pid, NULL, 0);
-		goto cleanup_group;
+	for (measurement_count = 0; measurement_count < max_measurements; measurement_count++) {
+		/* Wait 100ms */
+		ts.tv_sec = 0;
+		ts.tv_nsec = 100 * 1000000;  /* 100ms */
+		nanosleep(&ts, NULL);
+		
+		ksft_print_msg("\n=== Measurement %d (at %dms) ===\n", 
+			       measurement_count + 1, (measurement_count + 1) * 100);
+		
+		/* Read LLC occupancy from resctrl */
+		if (read_llc_occupancy_from_resctrl(group_name, &periodic_llc_resctrl[measurement_count]) < 0) {
+			periodic_llc_resctrl[measurement_count] = 0;
+		}
+		ksft_print_msg("  LLC Resctrl FS: %lu bytes\n", periodic_llc_resctrl[measurement_count]);
+		
+		/* Read LLC occupancy from PMU */
+		if (read_llc_occupancy_from_pmu(pmu_type, group_name, &periodic_llc_pmu[measurement_count]) < 0) {
+			periodic_llc_pmu[measurement_count] = 0;
+		}
+		ksft_print_msg("  LLC PMU:        %lu bytes\n", periodic_llc_pmu[measurement_count]);
+		
+		/* Read MBM from resctrl */
+		if (read_mbm_from_resctrl(group_name, &periodic_mbm_total_resctrl[measurement_count], 
+					   &periodic_mbm_local_resctrl[measurement_count]) < 0) {
+			periodic_mbm_total_resctrl[measurement_count] = 0;
+			periodic_mbm_local_resctrl[measurement_count] = 0;
+		}
+		ksft_print_msg("  MBM Total Resctrl: %lu bytes\n", periodic_mbm_total_resctrl[measurement_count]);
+		ksft_print_msg("  MBM Local Resctrl: %lu bytes\n", periodic_mbm_local_resctrl[measurement_count]);
+		
+		/* Read MBM from PMU */
+		if (read_mbm_from_pmu(pmu_type, group_name, &periodic_mbm_total_pmu[measurement_count],
+				      &periodic_mbm_local_pmu[measurement_count]) < 0) {
+			periodic_mbm_total_pmu[measurement_count] = 0;
+			periodic_mbm_local_pmu[measurement_count] = 0;
+		}
+		ksft_print_msg("  MBM Total PMU:     %lu bytes\n", periodic_mbm_total_pmu[measurement_count]);
+		ksft_print_msg("  MBM Local PMU:     %lu bytes\n", periodic_mbm_local_pmu[measurement_count]);
 	}
 	
-	/* Read from PMU again to check if resctrl read affected it */
-	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &pmu_occupancy2) < 0) {
-		kill(child_pid, SIGKILL);
-		waitpid(child_pid, NULL, 0);
-		goto cleanup_group;
-	}
-
+	/* Use the last measurements for validation */
+	resctrl_occupancy = periodic_llc_resctrl[max_measurements - 1];
+	pmu_occupancy = periodic_llc_pmu[max_measurements - 1];
+	
 	/* Wait for child to complete */
 	waitpid(child_pid, NULL, 0);
-
-	/* Print results */
-	ksft_print_msg("LLC Occupancy Results:\n");
-	ksft_print_msg("  Initial reads:\n");
-	ksft_print_msg("    Resctrl FS: %lu bytes\n", resctrl_occupancy);
-	ksft_print_msg("    PMU:        %lu bytes\n", pmu_occupancy);
-	ksft_print_msg("  Second reads (stability check):\n");
-	ksft_print_msg("    Resctrl FS: %lu bytes\n", resctrl_occupancy2);
-	ksft_print_msg("    PMU:        %lu bytes\n", pmu_occupancy2);
-
-	/* Check stability - values should not change between consecutive reads */
-	if (resctrl_occupancy != resctrl_occupancy2) {
-		ksft_print_msg("WARNING: Resctrl values changed between reads: %lu -> %lu\n",
-			       resctrl_occupancy, resctrl_occupancy2);
-	}
 	
-	if (pmu_occupancy != pmu_occupancy2) {
-		ksft_print_msg("WARNING: PMU values changed between reads: %lu -> %lu\n",
-			       pmu_occupancy, pmu_occupancy2);
+	/* Print summary of all measurements */
+	ksft_print_msg("\n=== Measurement Summary ===\n");
+	for (int i = 0; i < max_measurements; i++) {
+		ksft_print_msg("Time %dms: LLC(resctrl=%lu, pmu=%lu), MBM_total(resctrl=%lu, pmu=%lu), MBM_local(resctrl=%lu, pmu=%lu)\n",
+			       (i + 1) * 100,
+			       periodic_llc_resctrl[i], periodic_llc_pmu[i],
+			       periodic_mbm_total_resctrl[i], periodic_mbm_total_pmu[i],
+			       periodic_mbm_local_resctrl[i], periodic_mbm_local_pmu[i]);
 	}
+
+	/* Print final results */
+	ksft_print_msg("\n=== Final LLC Occupancy Results ===\n");
+	ksft_print_msg("  Resctrl FS: %lu bytes\n", resctrl_occupancy);
+	ksft_print_msg("  PMU:        %lu bytes\n", pmu_occupancy);
 
 	/* Check if values are within expected range */
 	if (resctrl_occupancy < MIN_EXPECTED_OCCUPANCY || 
