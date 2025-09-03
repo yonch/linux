@@ -1069,27 +1069,43 @@ jobs:
           fi
           
       - name: Run PMU test
+        id: run_pmu_test
+        continue-on-error: true
         run: |
           echo "🧪 Running resctrl PMU test..."
           echo "Testing kernel from release: ${{ needs.build-kernel.outputs.release-tag }}"
           
           ./resctrl_tests -t pmu
           
-      - name: Capture test results
+      - name: Capture dmesg on test failure
         if: always()
         run: |
           echo "📊 Test Results Summary"
           echo "======================="
           echo "Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
           echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
+          echo "Test exit code: ${{ steps.run_pmu_test.outcome }}"
           
           echo ""
-          echo "🔍 Recent kernel messages:"
-          dmesg | tail -100
+          echo "🔍 Full kernel messages (dmesg):"
+          echo "================================"
+          dmesg
           
           echo ""
-          echo "🎯 PMU-related kernel messages:"
-          dmesg | grep -i -E "(pmu|perf|resctrl|rdt)" | tail -50 || echo "No PMU messages"
+          echo "🎯 PMU-related kernel messages (filtered):"
+          echo "=========================================="
+          dmesg | grep -i -E "(pmu|perf|resctrl|rdt|WARN|WARNING|BUG)" || echo "No PMU messages"
+          
+          echo ""
+          echo "⚠️ WARN_ONCE messages (if any):"
+          echo "================================"
+          dmesg | grep -E "WARNING:|WARN_ONCE" || echo "No WARN_ONCE messages found"
+          
+      - name: Fail if test failed
+        if: steps.run_pmu_test.outcome == 'failure'
+        run: |
+          echo "❌ PMU test failed!"
+          exit 1
 
   cleanup:
     name: Cleanup runners and EC2 instance

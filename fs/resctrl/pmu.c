@@ -205,6 +205,8 @@ static void resctrl_event_update(struct perf_event *event)
 
 	/* Check if rdtgroup has been deleted */
 	if (rdtgrp->flags & RDT_DELETED) {
+		WARN_ONCE(1, "resctrl PMU: attempting to read from deleted rdtgroup (closid=%u, rmid=%u)\n",
+			  rdtgrp->closid, rdtgrp->mon.rmid);
 		local64_set(&event->hw.prev_count, 0);
 		return;
 	}
@@ -220,8 +222,12 @@ static void resctrl_event_update(struct perf_event *event)
 	cpus_read_unlock();
 
 	/* Update counter value based on read result */
-	if (!rr.err)
+	if (!rr.err) {
 		value = rr.val;
+	} else {
+		WARN_ONCE(1, "resctrl PMU: RMID read error (err=%d) for closid=%u, rmid=%u, evtid=%d\n",
+			  rr.err, rdtgrp->closid, rdtgrp->mon.rmid, rr.evtid);
+	}
 
 	local64_set(&event->hw.prev_count, value);
 }
