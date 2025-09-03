@@ -376,8 +376,10 @@ static int __mon_event_count(u32 closid, u32 rmid, struct rmid_read *rr)
 
 	if (rr->d) {
 		/* Reading a single domain, must be on a CPU in that domain. */
-		if (!cpumask_test_cpu(cpu, &rr->d->hdr.cpu_mask))
+		if (!cpumask_test_cpu(cpu, &rr->d->hdr.cpu_mask)) {
+			rr->err = -EINVAL;
 			return -EINVAL;
+		}
 		rr->err = resctrl_arch_rmid_read(rr->r, rr->d, closid, rmid,
 						 rr->evtid, &tval, rr->arch_mon_ctx);
 		if (rr->err)
@@ -390,8 +392,10 @@ static int __mon_event_count(u32 closid, u32 rmid, struct rmid_read *rr)
 
 	/* Summing domains that share a cache, must be on a CPU for that cache. */
 	ci = get_cpu_cacheinfo_level(cpu, RESCTRL_L3_CACHE);
-	if (!ci || ci->id != rr->ci_id)
+	if (!ci || ci->id != rr->ci_id) {
+		rr->err = -EINVAL;
 		return -EINVAL;
+	}
 
 	/*
 	 * Legacy files must report the sum of an event across all
