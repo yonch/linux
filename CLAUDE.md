@@ -18,6 +18,24 @@ Documentation in:
 - Documentation/filesystems/resctrl.rst
 - tools/testing/selftests/resctrl/README
 
+## Quick Compilation Checks
+
+After modifying source files, verify compilation locally before pushing:
+
+### For resctrl kernel modules (fast):
+```bash
+# Compile only resctrl subsystem (~30 seconds)
+make -j$(nproc) arch/x86/kernel/cpu/resctrl/
+make -j$(nproc) fs/resctrl/
+```
+
+### For resctrl selftests (instant):
+```bash
+cd tools/testing/selftests/resctrl && make clean && make
+```
+
+### For full kernel build (avoid unless necessary):
+Only use `make -j$(nproc)` when absolutely required, as it takes significant time.
 
 ----
 # Understanding the Perf Subsystem in the Linux Kernel
