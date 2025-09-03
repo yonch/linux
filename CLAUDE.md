@@ -95,13 +95,17 @@ Understanding these perf subsystem internals is crucial when adding new PMU supp
 Overview of Available Workflows
 -------------------------------
 
-We have three GitHub Actions workflows for kernel development and testing:
+We have two GitHub Actions workflows for kernel development and testing:
 
 1. **`extract-kernel-config.yml`** - Extracts kernel configuration from Ubuntu AMIs running on specific EC2 instance types. This workflow creates a `localmodconfig` that dramatically reduces build times by including only modules needed for the target hardware (typically reducing from ~7000 modules to ~200, a 35x reduction).
 
-2. **`build-kernel.yml`** - Builds the Linux kernel using the extracted localmodconfig for fast compilation. Produces kernel binaries (bzImage, vmlinux), initrd, and creates GitHub releases with all artifacts. Uses ccache for incremental builds and various optimizations.
-
-3. **`custom-kernel-test.yml`** - Deploys and tests the custom kernel on an EC2 instance using kexec. Tests resctrl PMU functionality and captures detailed logs for verification.
+2. **`build-and-test-kernel.yml`** - A combined workflow that builds the Linux kernel and tests it on an EC2 instance. This workflow:
+   - Builds the kernel using the extracted localmodconfig for fast compilation
+   - Produces kernel binaries (bzImage, vmlinux) and initrd
+   - Creates GitHub releases with all artifacts  
+   - Uses ccache for incremental builds and various optimizations
+   - Deploys the custom kernel on an EC2 instance using kexec
+   - Tests resctrl PMU functionality and captures detailed logs for verification
 
 Pushing to Master Branch
 ------------------------
@@ -124,17 +128,12 @@ gh workflow run extract-kernel-config.yml \
   --field instance-type=m7i.metal-24xl \
   --field image-type=ubuntu-24.04
 
-# 2. Build kernel (uses config from step 1)  
-gh workflow run build-kernel.yml \
+# 2. Build and test kernel (uses config from step 1)  
+gh workflow run build-and-test-kernel.yml \
   --field instance-type=m7i.metal-24xl \
   --field image-type=ubuntu-24.04 \
-  --field build-type=localmod
-
-# 3. Test kernel (uses latest GitHub release)
-gh workflow run custom-kernel-test.yml \
-  --field build-id=$(git rev-parse HEAD) \
-  --field instance-type=m7i.xlarge \
-  --field image-type=ubuntu-24.04
+  --field build-type=localmod \
+  --field test-instance-type=m7i.metal-24xl
 ```
 
 **Handling Timeout Issues**: The default bash timeout is 2 minutes. For long-running workflows, monitor progress with:
@@ -179,17 +178,13 @@ git push origin HEAD:master
 gh workflow run extract-kernel-config.yml --field instance-type=m7i.metal-24xl
 gh run watch  # Monitor until complete
 
-# 3. Build kernel with extracted config
-gh workflow run build-kernel.yml --field build-type=localmod  
-gh run watch  # Monitor build progress
+# 3. Build and test kernel with extracted config
+gh workflow run build-and-test-kernel.yml --field build-type=localmod --field test-instance-type=m7i.metal-24xl
+gh run watch  # Monitor build and test progress
 
-# 4. Test the built kernel
-gh workflow run custom-kernel-test.yml --field build-id=$(git rev-parse HEAD)
-gh run watch  # Monitor test execution
-
-# 5. Examine detailed results
+# 4. Examine detailed results
 gh run list --limit 3
-gh run view <test-run-id> --log | grep -A5 -B5 "PMU\|resctrl\|ERROR\|WARNING"
+gh run view <run-id> --log | grep -A5 -B5 "PMU\|resctrl\|ERROR\|WARNING"
 ```
 
 This testing approach ensures comprehensive verification of kernel changes through the full build-deploy-test pipeline.
