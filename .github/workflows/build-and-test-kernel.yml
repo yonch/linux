@@ -273,7 +273,7 @@ jobs:
           KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" olddefconfig
           
           echo "📋 Final kernel configuration:"
-          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC=\"ccache gcc\" kernelrelease)"
+          echo "  - Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC=\"ccache gcc\" kernelrelease)"
           echo "  - Modules enabled: $(grep -c "=m$" "$BUILD_DIR/.config" || echo 0)"
           echo "  - Built-in features: $(grep -c "=y$" "$BUILD_DIR/.config" || echo 0)"
           echo "  - Debug features: $(grep -c "CONFIG_DEBUG.*=y$" "$BUILD_DIR/.config" || echo 0)"
@@ -313,7 +313,7 @@ jobs:
           
           mkdir -p artifacts
           
-          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           echo "Kernel version: ${KERNEL_VERSION}"
           
           MODULES_STAGING="$HOME/kernel-modules-staging"
@@ -405,7 +405,7 @@ jobs:
           Target Image: ${{ inputs.image-type || 'ubuntu-24.04' }}
           Debug Features: ${{ inputs.enable-debug || 'false' }}
           
-          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
+          Kernel Version: $(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           Compiler: $(gcc --version | head -1)
           
           Configuration Stats:
@@ -448,7 +448,7 @@ jobs:
           echo "🚀 Preparing release information..."
           
           RELEASE_TAG="resctrl-perf-$(date -u +%Y%m%d-%H%M%S)"
-          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
+          KERNEL_VERSION=$(KBUILD_BUILD_TIMESTAMP='' make -s O="$BUILD_DIR" CC="ccache gcc" kernelrelease)
           
           echo "📋 Release details:"
           echo "  Tag: $RELEASE_TAG"
@@ -540,7 +540,7 @@ jobs:
           echo ""
           echo "🎯 KERNEL BUILD COMPLETED SUCCESSFULLY!"
           echo "======================================"
-          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make O=\"$BUILD_DIR\" CC=\"ccache gcc\" kernelrelease)"
+          echo "✅ Kernel version: $(KBUILD_BUILD_TIMESTAMP='' make -s O=\"$BUILD_DIR\" CC=\"ccache gcc\" kernelrelease)"
           echo "✅ Build type: ${{ inputs.build-type || 'localmod' }}"
           echo "✅ GitHub release created: ${{ steps.release_info.outputs.release_tag }}"
           echo ""
