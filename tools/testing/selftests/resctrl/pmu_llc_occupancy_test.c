@@ -215,7 +215,9 @@ static void child_walk_permutation(const char *group_name, int ready_fd, int pro
 	
 	/* Traverse the 4MB buffer to fill L2 cache and spill to L3 */
 	ksft_print_msg("Child: Traversing 4MB buffer to fill L2 cache...\n");
-	total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
+	for (int i = 0; i < 10000; i++) {
+		total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
+	}
 	
 	/* Signal parent that we're ready for baseline measurement */
 	ksft_print_msg("Child: Signaling parent ready for baseline measurement\n");
