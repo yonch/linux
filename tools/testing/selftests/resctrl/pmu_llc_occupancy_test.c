@@ -6,12 +6,12 @@
  * the resctrl filesystem measurement.
  *
  * Test methodology:
- * 1. Child process first allocates 256MB buffer to flush cache (before joining resctrl group)
+ * 1. Parent allocates 256MB buffer and traverses it once before fork
  * 2. Child joins resctrl monitoring group
  * 3. Child allocates and traverses 4MB buffer to fill L2 cache and spill to L3
- * 4. Parent takes baseline LLC occupancy measurement
+ * 4. Parent creates cache pressure, waits 2ms, takes baseline LLC measurement
  * 5. Child allocates 1MB buffer and traverses both buffers for 100ms
- * 6. Parent measures again after 50ms
+ * 6. Parent waits 50ms, creates cache pressure, waits 2ms, takes final measurement
  * 7. Verify delta is 1MB ± 15% and resctrl/PMU within 10% of each other
  */
 
@@ -577,7 +577,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	/* Initialize random seed */
 	srand(time(NULL));
 	
-	/* Step 1: Parent allocates 256MB array and traverses it 100 times */
+	/* Step 1: Parent allocates 256MB array and traverses it once */
 	ksft_print_msg("Parent: Allocating and traversing 256MB array before fork...\n");
 	parent_flush_array = allocate_and_initialize_permutation(FLUSH_ARRAY_SIZE);
 	if (!parent_flush_array) {
@@ -585,9 +585,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		goto cleanup_group;
 	}
 	
-	for (int i = 0; i < 100; i++) {
-		parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
-	}
+	parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
 	ksft_print_msg("Parent: Initial traversal complete, checksum: 0x%lx\n", (unsigned long)parent_checksum);
 
 	/* Create pipes for bidirectional communication */
@@ -626,11 +624,9 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		goto cleanup_child;
 	}
 	
-	/* Step 3: Parent traverses 256MB array 100 times to create cache pressure */
+	/* Step 3: Parent traverses 256MB array once to create cache pressure */
 	ksft_print_msg("Parent: Creating cache pressure before baseline measurement...\n");
-	for (int i = 0; i < 100; i++) {
-		parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
-	}
+	parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
 	
 	/* Wait 2 milliseconds */
 	ksft_print_msg("Parent: Waiting 2ms before baseline measurement...\n");
@@ -666,11 +662,9 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	ts.tv_nsec = MEASUREMENT_DELAY_MS * 1000000;  /* Convert ms to ns */
 	nanosleep(&ts, NULL);
 	
-	/* Traverse 256MB array 100 times to create cache pressure */
+	/* Traverse 256MB array once to create cache pressure */
 	ksft_print_msg("Parent: Creating cache pressure before final measurement...\n");
-	for (int i = 0; i < 100; i++) {
-		parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
-	}
+	parent_checksum += traverse_permutation(parent_flush_array, FLUSH_ARRAY_SIZE);
 	
 	/* Wait 2 milliseconds */
 	ksft_print_msg("Parent: Waiting 2ms before final measurement...\n");
