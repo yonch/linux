@@ -211,7 +211,7 @@ static void resctrl_event_update(struct perf_event *event)
 			rdtgrp->closid, rdtgrp->mon.rmid);
 		WARN_ONCE(1, "resctrl PMU: attempting to read from deleted rdtgroup (closid=%u, rmid=%u)\n",
 			  rdtgrp->closid, rdtgrp->mon.rmid);
-		local64_set(&event->hw.prev_count, 0);
+		local64_set(&event->count, 0);
 		return;
 	}
 
@@ -240,7 +240,7 @@ static void resctrl_event_update(struct perf_event *event)
 			  rr.err, rdtgrp->closid, rdtgrp->mon.rmid, rr.evtid);
 	}
 
-	local64_set(&event->hw.prev_count, value);
+	local64_set(&event->count, value);
 }
 
 /*
