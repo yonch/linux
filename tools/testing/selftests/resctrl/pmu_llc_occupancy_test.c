@@ -15,8 +15,8 @@
 #define RESCTRL_PMU_NAME "resctrl"
 #define ARRAY_SIZE_MB 1
 #define PERM_ARRAY_SIZE (ARRAY_SIZE_MB * MB / sizeof(uint32_t))
-#define MIN_EXPECTED_OCCUPANCY (800 * 1024)  // 800 KB
-#define MAX_EXPECTED_OCCUPANCY (2.5 * MB)    // 2.5 MB
+#define MIN_EXPECTED_OCCUPANCY (1600 * 1024)  // 1.6 MB (two 1MB arrays, some may be evicted)
+#define MAX_EXPECTED_OCCUPANCY (2200 * 1024)  // 2.2 MB (two 1MB arrays plus some overhead)
 #define TOLERANCE_PERCENT 10
 #define ITERATIONS_PER_CHECK 1000
 #define CHILD_RUNTIME_MS 550
@@ -58,18 +58,20 @@ static int find_pmu_type(const char *pmu_name)
  * 5. Set Idx=M
  * 6. If P is nonempty repeat from step 3
  * 7. Assign 1 to the last spot at Idx
+ * 
+ * @perm: Array to store the permutation (size n)
+ * @pool: Pre-allocated pool array (size n-1), MANDATORY - will be modified
+ * @n: Size of the permutation
  */
-static void create_single_cycle_permutation(uint32_t *perm, size_t n)
+static void create_single_cycle_permutation(uint32_t *perm, uint32_t *pool, size_t n)
 {
-	uint32_t *pool;
 	size_t pool_size;
 	size_t idx;
 	size_t i;
 
-	/* Allocate pool for remaining elements */
-	pool = malloc((n - 1) * sizeof(uint32_t));
+	/* Pool must be provided */
 	if (!pool) {
-		perror("malloc");
+		ksft_print_msg("ERROR: pool parameter is mandatory\n");
 		exit(1);
 	}
 
@@ -101,8 +103,6 @@ static void create_single_cycle_permutation(uint32_t *perm, size_t n)
 	
 	/* Assign 1 (0 in 0-indexed) to the last spot */
 	perm[idx] = 0;
-	
-	free(pool);
 }
 
 static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
@@ -131,8 +131,8 @@ static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
 /* Child process: Walk the permutation continuously */
 static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
-	uint32_t *initial_perm;
-	uint32_t *flush_perm;
+	uint32_t *flush_perm, *flush_pool;
+	uint32_t *perm_array1, *perm_array2;
 	struct timespec start, now, delay_ts;
 	size_t idx;
 	size_t iterations = 0;
@@ -143,25 +143,24 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	char *line = NULL;
 	size_t len = 0;
 
-	/* Step 1: Generate initial permutation (not tracked by resctrl) */
-	initial_perm = malloc(n * sizeof(uint32_t));
-	if (!initial_perm) {
-		perror("malloc initial_perm");
-		exit(1);
-	}
-	create_single_cycle_permutation(initial_perm, n);
-
-	/* Step 2: Create and fill a huge 256MB permutation to flush the cache */
+	/* Step 1: Create and walk a huge 256MB permutation to flush the cache */
 	ksft_print_msg("Creating 256MB flush permutation to evict cache...\n");
 	flush_perm = malloc(flush_size * sizeof(uint32_t));
 	if (!flush_perm) {
 		perror("malloc flush_perm");
-		free(initial_perm);
 		exit(1);
 	}
 	
-	/* Generate the flush permutation (this will allocate another 256MB for the pool) */
-	create_single_cycle_permutation(flush_perm, flush_size);
+	/* Allocate pool for flush permutation (256MB - 4 bytes) */
+	flush_pool = malloc((flush_size - 1) * sizeof(uint32_t));
+	if (!flush_pool) {
+		perror("malloc flush_pool");
+		free(flush_perm);
+		exit(1);
+	}
+	
+	/* Generate the flush permutation */
+	create_single_cycle_permutation(flush_perm, flush_pool, flush_size);
 	
 	/* Walk through the flush permutation once to ensure it's in cache */
 	ksft_print_msg("Walking flush permutation to ensure cache eviction...\n");
@@ -174,21 +173,49 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Use the checksum to ensure it's not optimized out */
 	ksft_print_msg("Flush walk checksum: 0x%lx\n", (unsigned long)flush_checksum);
 	
-	/* Free the flush permutation - we're done with it */
-	free(flush_perm);
-	ksft_print_msg("Cache flush complete, original permutation should be evicted\n");
+	/* Keep BOTH flush permutation and pool allocated - prevents memory reuse */
+	ksft_print_msg("Keeping 512MB (256MB flush array + 256MB pool) allocated to prevent memory reuse\n");
 
-	/* Step 3: Now add ourselves to the monitoring group */
+	/* Step 2: Join the resctrl monitoring group */
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
-		free(initial_perm);
+		free(flush_perm);
+		free(flush_pool);
 		exit(1);
 	}
 
-	/* Wait 100ms to ensure all measurements are set up */
+	/* Step 3: Wait 100ms to ensure all measurements are set up */
 	ksft_print_msg("Child waiting 100ms after joining group...\n");
 	delay_ts.tv_sec = 0;
 	delay_ts.tv_nsec = 100 * 1000000;  /* 100ms */
 	nanosleep(&delay_ts, NULL);
+
+	/* Step 4: Allocate two 1MB arrays */
+	ksft_print_msg("Allocating two 1MB arrays for permutations...\n");
+	perm_array1 = malloc(n * sizeof(uint32_t));
+	if (!perm_array1) {
+		perror("malloc perm_array1");
+		free(flush_perm);
+		free(flush_pool);
+		exit(1);
+	}
+	
+	/* Array2 will be used as pool initially (n elements, though only n-1 needed for pool) */
+	perm_array2 = malloc(n * sizeof(uint32_t));
+	if (!perm_array2) {
+		perror("malloc perm_array2");
+		free(flush_perm);
+		free(flush_pool);
+		free(perm_array1);
+		exit(1);
+	}
+	
+	/* Step 5: Create permutation in array1 using array2 as the pool */
+	ksft_print_msg("Creating permutation in array1 using array2 as pool...\n");
+	create_single_cycle_permutation(perm_array1, perm_array2, n);
+	
+	/* Step 6: Copy the permutation from array1 to array2 (now we have two replicas) */
+	ksft_print_msg("Copying permutation to create second replica...\n");
+	memcpy(perm_array2, perm_array1, n * sizeof(uint32_t));
 
 	/* Read and print the tasks file to verify we're in the group */
 	snprintf(path, sizeof(path), "%s/mon_groups/%s/tasks", RESCTRL_PATH, group_name);
@@ -207,7 +234,10 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Signal parent that we're ready */
 	if (write(ready_fd, &ready, 1) != 1) {
 		perror("write ready signal");
-		free(initial_perm);
+		free(flush_perm);
+		free(flush_pool);
+		free(perm_array1);
+		free(perm_array2);
 		exit(1);
 	}
 	close(ready_fd);
@@ -215,14 +245,20 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	/* Get start time */
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	/* Step 4: Walk the initial permutation continuously (this will bring it back into cache) */
-	idx = 0;
+	/* Step 7: Walk both permutation arrays continuously */
+	ksft_print_msg("Walking both 1MB permutation arrays...\n");
+	size_t idx1 = 0, idx2 = 0;
 	volatile uint64_t checksum = 0;  /* Use volatile to prevent optimization */
 	
 	while (1) {
-		/* Read and accumulate the value to ensure memory access happens */
-		checksum += initial_perm[idx];
-		idx = initial_perm[idx];
+		/* Walk array1 */
+		checksum += perm_array1[idx1];
+		idx1 = perm_array1[idx1];
+		
+		/* Walk array2 */
+		checksum += perm_array2[idx2];
+		idx2 = perm_array2[idx2];
+		
 		iterations++;
 
 		/* Check time every ITERATIONS_PER_CHECK iterations */
@@ -237,11 +273,14 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 		}
 	}
 	
-	/* Output the checksum to kernel log to absolutely ensure it's not optimized out */
+	/* Output the checksum to ensure it's not optimized out */
 	ksft_print_msg("Permutation walk completed: %lu iterations, checksum: 0x%lx\n", 
 		       iterations, (unsigned long)checksum);
 
-	free(initial_perm);
+	free(flush_perm);
+	free(flush_pool);
+	free(perm_array1);
+	free(perm_array2);
 	exit(0);
 }
 
@@ -649,14 +688,14 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	/* Check if values are within expected range */
 	if (resctrl_occupancy < MIN_EXPECTED_OCCUPANCY || 
 	    resctrl_occupancy > MAX_EXPECTED_OCCUPANCY) {
-		ksft_print_msg("FAIL: Resctrl occupancy %lu outside expected range [%d, %.0f]\n",
+		ksft_print_msg("FAIL: Resctrl occupancy %lu outside expected range [%d, %d]\n",
 			       resctrl_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
 		goto cleanup_group;
 	}
 
 	if (pmu_occupancy < MIN_EXPECTED_OCCUPANCY || 
 	    pmu_occupancy > MAX_EXPECTED_OCCUPANCY) {
-		ksft_print_msg("FAIL: PMU occupancy %lu outside expected range [%d, %.0f]\n",
+		ksft_print_msg("FAIL: PMU occupancy %lu outside expected range [%d, %d]\n",
 			       pmu_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
 		goto cleanup_group;
 	}
