@@ -20,6 +20,7 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <errno.h>
 
 #define RESCTRL_PMU_NAME "resctrl"
 #define FLUSH_SIZE_MB 256
@@ -229,13 +230,36 @@ static void child_walk_permutation(const char *group_name, int ready_fd, int pro
 	}
 	close(ready_fd);
 
-	/* Wait for parent to signal to proceed */
-	ksft_print_msg("Child: Waiting for parent signal to proceed...\n");
-	if (read(proceed_fd, &proceed, 1) != 1) {
-		perror("read proceed signal");
-		free(flush_array);
-		free(initial_array);
-		exit(1);
+	/* Keep traversing the 4MB permutation while waiting for parent signal */
+	ksft_print_msg("Child: Continuously traversing 4MB buffer to maintain cache occupancy...\n");
+	int iteration_count = 0;
+	int flags;
+	int bytes_read;
+	
+	/* Set proceed_fd to non-blocking so we can check without blocking */
+	flags = fcntl(proceed_fd, F_GETFL, 0);
+	fcntl(proceed_fd, F_SETFL, flags | O_NONBLOCK);
+	
+	while (1) {
+		/* Traverse permutation 100 times */
+		for (int i = 0; i < 100; i++) {
+			total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
+		}
+		iteration_count += 100;
+		
+		/* Check for proceed signal without blocking */
+		bytes_read = read(proceed_fd, &proceed, 1);
+		if (bytes_read == 1) {
+			/* Got the signal, break out of loop */
+			ksft_print_msg("Child: Received proceed signal after %d iterations\n", iteration_count);
+			break;
+		} else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+			perror("read proceed signal");
+			free(flush_array);
+			free(initial_array);
+			exit(1);
+		}
+		/* Otherwise continue traversing */
 	}
 	close(proceed_fd);
 
