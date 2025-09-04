@@ -6,11 +6,13 @@
  * the resctrl filesystem measurement.
  *
  * Test methodology:
- * 1. Child process first allocates 256MB buffer to flush cache
- * 2. Child then dynamically allocates 1MB arrays every 100ms (up to 200 arrays over 20 seconds)
- * 3. Child continuously traverses all allocated arrays
- * 4. Parent measures LLC occupancy every 10ms via both resctrl FS and PMU
- * 5. All measurements are collected and printed at the end
+ * 1. Child process first allocates 256MB buffer to flush cache (before joining resctrl group)
+ * 2. Child joins resctrl monitoring group
+ * 3. Child allocates and traverses 4MB buffer to fill L2 cache and spill to L3
+ * 4. Parent takes baseline LLC occupancy measurement
+ * 5. Child allocates 1MB buffer and traverses both buffers for 100ms
+ * 6. Parent measures again after 50ms
+ * 7. Verify delta is 1MB ± 15% and resctrl/PMU within 10% of each other
  */
 
 #include "resctrl.h"
@@ -20,18 +22,16 @@
 #include <string.h>
 
 #define RESCTRL_PMU_NAME "resctrl"
-#define ARRAY_SIZE_MB 1
-#define PERM_ARRAY_SIZE (ARRAY_SIZE_MB * MB / sizeof(uint32_t))
 #define FLUSH_SIZE_MB 256
 #define FLUSH_ARRAY_SIZE (FLUSH_SIZE_MB * MB / sizeof(uint32_t))
-#define MIN_EXPECTED_OCCUPANCY (100 * 1024)  // Start with low expectation
-#define MAX_EXPECTED_OCCUPANCY (20 * MB)     // Up to 20MB for 20 arrays
-#define TOLERANCE_PERCENT 10
-#define ITERATIONS_PER_CHECK 1000
-#define TEST_DURATION_MS 20000  // 20 seconds total
-#define ALLOCATION_INTERVAL_MS 100  // Allocate new array every 100ms
-#define MEASUREMENT_INTERVAL_MS 10  // Parent measures every 10ms
-#define MAX_ARRAYS 200  // Maximum number of 1MB arrays to allocate
+#define INITIAL_BUFFER_SIZE_MB 4
+#define INITIAL_ARRAY_SIZE (INITIAL_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
+#define TEST_BUFFER_SIZE_MB 1
+#define TEST_ARRAY_SIZE (TEST_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
+#define TEST_DURATION_MS 100
+#define MEASUREMENT_DELAY_MS 50
+#define DELTA_TOLERANCE_PERCENT 15
+#define PMU_RESCTRL_TOLERANCE_PERCENT 10
 
 static int find_pmu_type(const char *pmu_name)
 {
@@ -172,24 +172,18 @@ static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
 	return 0;
 }
 
-/* Child process: Dynamically allocate and walk permutations */
-static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
+/* Child process: Allocate and walk permutations according to new test flow */
+static void child_walk_permutation(const char *group_name, int ready_fd, int proceed_fd)
 {
 	uint32_t *flush_array;
-	uint32_t *perm_arrays[MAX_ARRAYS];
-	struct timespec start, now, last_allocation, delay_ts;
+	uint32_t *initial_array;
+	uint32_t *test_array;
 	uint8_t ready = 1;
-	int num_arrays = 0;
+	uint8_t proceed;
 	volatile uint64_t total_checksum = 0;
-	int i;
 
-	/* Initialize array pointers */
-	for (i = 0; i < MAX_ARRAYS; i++) {
-		perm_arrays[i] = NULL;
-	}
-
-	/* Step 1: Create and walk a huge 256MB permutation to flush the cache */
-	ksft_print_msg("Creating 256MB flush permutation to evict cache...\n");
+	/* Phase 1: Create and walk a huge 256MB permutation to flush the cache */
+	ksft_print_msg("Child: Creating 256MB flush permutation to evict cache...\n");
 	flush_array = allocate_and_initialize_permutation(FLUSH_ARRAY_SIZE);
 	if (!flush_array) {
 		ksft_print_msg("Failed to allocate flush array\n");
@@ -197,84 +191,92 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	}
 	
 	/* Walk through the flush permutation once to flush cache */
-	ksft_print_msg("Walking flush permutation to ensure cache eviction...\n");
+	ksft_print_msg("Child: Walking flush permutation to ensure cache eviction...\n");
 	total_checksum = traverse_permutation(flush_array, FLUSH_ARRAY_SIZE);
-	ksft_print_msg("Flush walk checksum: 0x%lx\n", (unsigned long)total_checksum);
+	ksft_print_msg("Child: Flush walk checksum: 0x%lx\n", (unsigned long)total_checksum);
 	
 	/* Keep flush array allocated to prevent memory reuse */
-	ksft_print_msg("Keeping 512MB flush array allocated\n");
+	ksft_print_msg("Child: Keeping 512MB flush array allocated\n");
 
-	/* Step 2: Join the resctrl monitoring group */
+	/* Phase 2: Join the resctrl monitoring group */
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
 		free(flush_array);
 		exit(1);
 	}
 
-	/* Step 3: Wait 100ms to ensure all measurements are set up */
-	ksft_print_msg("Child waiting 100ms after joining group...\n");
-	delay_ts.tv_sec = 0;
-	delay_ts.tv_nsec = 100 * 1000000;  /* 100ms */
-	nanosleep(&delay_ts, NULL);
-
-	/* Signal parent that we're ready */
+	/* Phase 3: Immediately allocate and traverse 4MB buffer */
+	ksft_print_msg("Child: Allocating 4MB initial buffer...\n");
+	initial_array = allocate_and_initialize_permutation(INITIAL_ARRAY_SIZE);
+	if (!initial_array) {
+		ksft_print_msg("Failed to allocate initial array\n");
+		free(flush_array);
+		exit(1);
+	}
+	
+	/* Traverse the 4MB buffer to fill L2 cache and spill to L3 */
+	ksft_print_msg("Child: Traversing 4MB buffer to fill L2 cache...\n");
+	total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
+	
+	/* Signal parent that we're ready for baseline measurement */
+	ksft_print_msg("Child: Signaling parent ready for baseline measurement\n");
 	if (write(ready_fd, &ready, 1) != 1) {
 		perror("write ready signal");
 		free(flush_array);
+		free(initial_array);
 		exit(1);
 	}
 	close(ready_fd);
 
-	/* Get start time */
-	clock_gettime(CLOCK_MONOTONIC, &start);
-	last_allocation = start;
+	/* Wait for parent to signal to proceed */
+	ksft_print_msg("Child: Waiting for parent signal to proceed...\n");
+	if (read(proceed_fd, &proceed, 1) != 1) {
+		perror("read proceed signal");
+		free(flush_array);
+		free(initial_array);
+		exit(1);
+	}
+	close(proceed_fd);
 
-	ksft_print_msg("Starting dynamic allocation and traversal for %d seconds...\n", 
-		       TEST_DURATION_MS / 1000);
+	/* Phase 4: Allocate 1MB test buffer */
+	ksft_print_msg("Child: Allocating 1MB test buffer...\n");
+	test_array = allocate_and_initialize_permutation(TEST_ARRAY_SIZE / 2);  /* Half size for each permutation half */
+	if (!test_array) {
+		ksft_print_msg("Failed to allocate test array\n");
+		free(flush_array);
+		free(initial_array);
+		exit(1);
+	}
+
+	/* Traverse both 4MB and 1MB buffers for 100ms */
+	ksft_print_msg("Child: Traversing 4MB and 1MB buffers for %dms...\n", TEST_DURATION_MS);
+	struct timespec start, now;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 	
-	/* Main loop: allocate new arrays every 100ms and traverse all */
 	while (1) {
+		/* Traverse 4MB buffer */
+		total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
+		
+		/* Traverse 1MB buffer */
+		total_checksum += traverse_permutation(test_array, TEST_ARRAY_SIZE / 2);
+		
+		/* Check if 100ms have elapsed */
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
 				  (now.tv_nsec - start.tv_nsec) / 1000000;
 		
-		/* Check if test duration has elapsed */
 		if (elapsed_ms >= TEST_DURATION_MS) {
 			break;
-		}
-		
-		/* Check if it's time to allocate a new array */
-		long since_last_alloc = (now.tv_sec - last_allocation.tv_sec) * 1000 +
-					(now.tv_nsec - last_allocation.tv_nsec) / 1000000;
-		
-		if (since_last_alloc >= ALLOCATION_INTERVAL_MS && num_arrays < MAX_ARRAYS) {
-			/* Allocate new 1MB permutation array */
-			perm_arrays[num_arrays] = allocate_and_initialize_permutation(n);
-			if (perm_arrays[num_arrays]) {
-				num_arrays++;
-				ksft_print_msg("Allocated array %d at %ld ms\n", num_arrays, elapsed_ms);
-				last_allocation = now;
-			}
-		}
-		
-		/* Traverse all allocated arrays */
-		for (i = 0; i < num_arrays; i++) {
-			if (perm_arrays[i]) {
-				total_checksum += traverse_permutation(perm_arrays[i], n);
-			}
 		}
 	}
 	
 	/* Final statistics */
-	ksft_print_msg("Test completed: %d arrays allocated, checksum: 0x%lx\n", 
-		       num_arrays, (unsigned long)total_checksum);
+	ksft_print_msg("Child: Test completed, final checksum: 0x%lx\n", 
+		       (unsigned long)total_checksum);
 
 	/* Cleanup */
 	free(flush_array);
-	for (i = 0; i < num_arrays; i++) {
-		if (perm_arrays[i]) {
-			free(perm_arrays[i]);
-		}
-	}
+	free(initial_array);
+	free(test_array);
 	exit(0);
 }
 
@@ -548,52 +550,43 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	const char *group_name = "pmu_llc_test";
 	int pmu_type;
 	pid_t child_pid;
-	int pipe_fds[2];
+	int ready_pipe[2];  /* Child -> Parent: ready signal */
+	int proceed_pipe[2]; /* Parent -> Child: proceed signal */
 	int ret = -1;
 	uint8_t ready;
-	struct timespec ts, test_start;
-	
-	/* Arrays to store all measurements */
-	int max_measurements = (TEST_DURATION_MS / MEASUREMENT_INTERVAL_MS) + 10;
-	unsigned long *llc_resctrl = calloc(max_measurements, sizeof(unsigned long));
-	unsigned long *llc_pmu = calloc(max_measurements, sizeof(unsigned long));
-	unsigned long *timestamps = calloc(max_measurements, sizeof(unsigned long));
-	int measurement_count = 0;
+	uint8_t proceed = 1;
+	struct timespec ts;
+	unsigned long baseline_resctrl = 0, baseline_pmu = 0;
+	unsigned long final_resctrl = 0, final_pmu = 0;
+	unsigned long delta_resctrl, delta_pmu;
 
-	if (!llc_resctrl || !llc_pmu || !timestamps) {
-		ksft_print_msg("Failed to allocate measurement arrays\n");
-		free(llc_resctrl);
-		free(llc_pmu);
-		free(timestamps);
-		return -1;
-	}
-
-	ksft_print_msg("Testing PMU LLC occupancy measurement with dynamic allocation\n");
+	ksft_print_msg("Testing PMU LLC occupancy measurement with controlled memory allocation\n");
 
 	/* Find the resctrl PMU type */
 	pmu_type = find_pmu_type(RESCTRL_PMU_NAME);
 	if (pmu_type < 0) {
 		ksft_print_msg("Resctrl PMU not found\n");
-		free(llc_resctrl);
-		free(llc_pmu);
-		free(timestamps);
 		return -1;
 	}
 
 	/* Create monitoring group */
 	if (create_monitoring_group(group_name) < 0) {
-		free(llc_resctrl);
-		free(llc_pmu);
-		free(timestamps);
 		return -1;
 	}
 
 	/* Initialize random seed */
 	srand(time(NULL));
 
-	/* Create pipe for child ready signal */
-	if (pipe(pipe_fds) < 0) {
-		perror("pipe");
+	/* Create pipes for bidirectional communication */
+	if (pipe(ready_pipe) < 0) {
+		perror("pipe ready");
+		goto cleanup_group;
+	}
+	
+	if (pipe(proceed_pipe) < 0) {
+		perror("pipe proceed");
+		close(ready_pipe[0]);
+		close(ready_pipe[1]);
 		goto cleanup_group;
 	}
 
@@ -601,123 +594,162 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	child_pid = fork();
 	if (child_pid < 0) {
 		perror("fork");
-		close(pipe_fds[0]);
-		close(pipe_fds[1]);
+		close(ready_pipe[0]);
+		close(ready_pipe[1]);
+		close(proceed_pipe[0]);
+		close(proceed_pipe[1]);
 		goto cleanup_group;
 	}
 
 	if (child_pid == 0) {
 		/* Child process */
-		close(pipe_fds[0]);
-		child_walk_permutation(group_name, PERM_ARRAY_SIZE, pipe_fds[1]);
+		close(ready_pipe[0]);   /* Close read end of ready pipe */
+		close(proceed_pipe[1]); /* Close write end of proceed pipe */
+		child_walk_permutation(group_name, ready_pipe[1], proceed_pipe[0]);
 		/* Should not reach here */
 		exit(1);
 	}
 
 	/* Parent process */
-	close(pipe_fds[1]);
+	close(ready_pipe[1]);   /* Close write end of ready pipe */
+	close(proceed_pipe[0]); /* Close read end of proceed pipe */
 
-	/* Wait for child to be ready (it will add itself to the monitoring group first) */
-	if (read(pipe_fds[0], &ready, 1) != 1) {
+	/* Wait for child to be ready (after 4MB allocation) */
+	ksft_print_msg("Parent: Waiting for child to be ready...\n");
+	if (read(ready_pipe[0], &ready, 1) != 1) {
 		ksft_print_msg("Failed to get ready signal from child\n");
-		close(pipe_fds[0]);
+		close(ready_pipe[0]);
+		close(proceed_pipe[1]);
 		kill(child_pid, SIGKILL);
 		waitpid(child_pid, NULL, 0);
 		goto cleanup_group;
 	}
-	close(pipe_fds[0]);
+	close(ready_pipe[0]);
 
-	ksft_print_msg("Child process (PID %d) ready, starting measurements\n", child_pid);
-
-	/* Record test start time */
-	clock_gettime(CLOCK_MONOTONIC, &test_start);
-	
-	/* Perform measurements every MEASUREMENT_INTERVAL_MS */
-	while (1) {
-		/* Wait for next measurement interval */
-		ts.tv_sec = 0;
-		ts.tv_nsec = MEASUREMENT_INTERVAL_MS * 1000000;  /* Convert ms to ns */
-		nanosleep(&ts, NULL);
-		
-		/* Check elapsed time */
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		long elapsed_ms = (now.tv_sec - test_start.tv_sec) * 1000 +
-				  (now.tv_nsec - test_start.tv_nsec) / 1000000;
-		
-		if (elapsed_ms >= TEST_DURATION_MS || measurement_count >= max_measurements - 1) {
-			break;
-		}
-		
-		/* Record timestamp */
-		timestamps[measurement_count] = elapsed_ms;
-		
-		/* Read LLC occupancy from resctrl */
-		if (read_llc_occupancy_from_resctrl(group_name, &llc_resctrl[measurement_count]) < 0) {
-			llc_resctrl[measurement_count] = 0;
-		}
-		
-		/* Read LLC occupancy from PMU */
-		if (read_llc_occupancy_from_pmu(pmu_type, group_name, &llc_pmu[measurement_count]) < 0) {
-			llc_pmu[measurement_count] = 0;
-		}
-		
-		measurement_count++;
+	/* Take baseline measurements */
+	ksft_print_msg("Parent: Taking baseline measurements...\n");
+	if (read_llc_occupancy_from_resctrl(group_name, &baseline_resctrl) < 0) {
+		ksft_print_msg("Failed to read baseline resctrl occupancy\n");
+		close(proceed_pipe[1]);
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
 	}
+	
+	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &baseline_pmu) < 0) {
+		ksft_print_msg("Failed to read baseline PMU occupancy\n");
+		close(proceed_pipe[1]);
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+
+	ksft_print_msg("Parent: Baseline - Resctrl: %lu bytes, PMU: %lu bytes\n", 
+		       baseline_resctrl, baseline_pmu);
+
+	/* Signal child to proceed with 1MB allocation */
+	ksft_print_msg("Parent: Signaling child to proceed with test...\n");
+	if (write(proceed_pipe[1], &proceed, 1) != 1) {
+		perror("write proceed signal");
+		close(proceed_pipe[1]);
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+	close(proceed_pipe[1]);
+
+	/* Wait 50ms before taking second measurement */
+	ksft_print_msg("Parent: Waiting %dms before second measurement...\n", MEASUREMENT_DELAY_MS);
+	ts.tv_sec = 0;
+	ts.tv_nsec = MEASUREMENT_DELAY_MS * 1000000;  /* Convert ms to ns */
+	nanosleep(&ts, NULL);
+
+	/* Take final measurements */
+	ksft_print_msg("Parent: Taking final measurements...\n");
+	if (read_llc_occupancy_from_resctrl(group_name, &final_resctrl) < 0) {
+		ksft_print_msg("Failed to read final resctrl occupancy\n");
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+	
+	if (read_llc_occupancy_from_pmu(pmu_type, group_name, &final_pmu) < 0) {
+		ksft_print_msg("Failed to read final PMU occupancy\n");
+		kill(child_pid, SIGKILL);
+		waitpid(child_pid, NULL, 0);
+		goto cleanup_group;
+	}
+
+	ksft_print_msg("Parent: Final - Resctrl: %lu bytes, PMU: %lu bytes\n", 
+		       final_resctrl, final_pmu);
 	
 	/* Wait for child to complete */
 	waitpid(child_pid, NULL, 0);
 	
-	/* Print all measurements at once */
-	ksft_print_msg("\n=== All Measurements (LLC Occupancy in bytes) ===\n");
-	ksft_print_msg("Time(ms)\tResctrl\t\tPMU\n");
-	for (int i = 0; i < measurement_count; i++) {
-		ksft_print_msg("%lu\t\t%lu\t\t%lu\n", 
-			       timestamps[i], llc_resctrl[i], llc_pmu[i]);
-	}
+	/* Calculate deltas */
+	delta_resctrl = final_resctrl - baseline_resctrl;
+	delta_pmu = final_pmu - baseline_pmu;
 	
-	/* Analyze results - use average of last 10 measurements */
-	int analyze_start = (measurement_count > 10) ? measurement_count - 10 : 0;
-	unsigned long avg_resctrl = 0, avg_pmu = 0;
-	for (int i = analyze_start; i < measurement_count; i++) {
-		avg_resctrl += llc_resctrl[i];
-		avg_pmu += llc_pmu[i];
-	}
-	int analyze_count = measurement_count - analyze_start;
-	avg_resctrl /= analyze_count;
-	avg_pmu /= analyze_count;
+	ksft_print_msg("\n=== Test Results ===\n");
+	ksft_print_msg("Baseline - Resctrl: %lu bytes, PMU: %lu bytes\n", 
+		       baseline_resctrl, baseline_pmu);
+	ksft_print_msg("Final    - Resctrl: %lu bytes, PMU: %lu bytes\n", 
+		       final_resctrl, final_pmu);
+	ksft_print_msg("Delta    - Resctrl: %lu bytes, PMU: %lu bytes\n", 
+		       delta_resctrl, delta_pmu);
 	
-	ksft_print_msg("\n=== Final Analysis (average of last %d measurements) ===\n", analyze_count);
-	ksft_print_msg("  Average Resctrl: %lu bytes\n", avg_resctrl);
-	ksft_print_msg("  Average PMU:     %lu bytes\n", avg_pmu);
+	/* Expected delta is 1MB */
+	unsigned long expected_delta = TEST_BUFFER_SIZE_MB * MB;
 	
-	/* Check if values are reasonable (we don't have strict bounds anymore) */
-	if (avg_resctrl == 0 || avg_pmu == 0) {
-		ksft_print_msg("FAIL: Got zero measurements\n");
+	/* Check if deltas are within 15% of expected 1MB */
+	unsigned long resctrl_diff = (delta_resctrl > expected_delta) ? 
+				      (delta_resctrl - expected_delta) :
+				      (expected_delta - delta_resctrl);
+	double resctrl_percent_diff = (double)resctrl_diff * 100.0 / expected_delta;
+	
+	unsigned long pmu_diff = (delta_pmu > expected_delta) ? 
+				  (delta_pmu - expected_delta) :
+				  (expected_delta - delta_pmu);
+	double pmu_percent_diff = (double)pmu_diff * 100.0 / expected_delta;
+	
+	ksft_print_msg("\nDelta vs Expected (1MB):\n");
+	ksft_print_msg("  Resctrl delta: %.1f%% difference from expected\n", resctrl_percent_diff);
+	ksft_print_msg("  PMU delta:     %.1f%% difference from expected\n", pmu_percent_diff);
+	
+	if (resctrl_percent_diff > DELTA_TOLERANCE_PERCENT) {
+		ksft_print_msg("FAIL: Resctrl delta difference %.1f%% exceeds tolerance %d%%\n",
+			       resctrl_percent_diff, DELTA_TOLERANCE_PERCENT);
 		goto cleanup_group;
 	}
 	
-	/* Check if values are within tolerance of each other */
-	unsigned long diff = (avg_resctrl > avg_pmu) ? 
-			     (avg_resctrl - avg_pmu) :
-			     (avg_pmu - avg_resctrl);
-	double percent_diff = (double)diff * 100.0 / ((avg_resctrl + avg_pmu) / 2);
-
-	if (percent_diff > TOLERANCE_PERCENT) {
-		ksft_print_msg("FAIL: Difference %.1f%% exceeds tolerance %d%%\n",
-			       percent_diff, TOLERANCE_PERCENT);
+	if (pmu_percent_diff > DELTA_TOLERANCE_PERCENT) {
+		ksft_print_msg("FAIL: PMU delta difference %.1f%% exceeds tolerance %d%%\n",
+			       pmu_percent_diff, DELTA_TOLERANCE_PERCENT);
+		goto cleanup_group;
+	}
+	
+	/* Check if resctrl and PMU measurements are within 10% of each other */
+	unsigned long measurement_diff = (delta_resctrl > delta_pmu) ? 
+					  (delta_resctrl - delta_pmu) :
+					  (delta_pmu - delta_resctrl);
+	double measurement_percent_diff = (double)measurement_diff * 100.0 / ((delta_resctrl + delta_pmu) / 2);
+	
+	ksft_print_msg("\nResctrl vs PMU comparison:\n");
+	ksft_print_msg("  Difference: %.1f%%\n", measurement_percent_diff);
+	
+	if (measurement_percent_diff > PMU_RESCTRL_TOLERANCE_PERCENT) {
+		ksft_print_msg("FAIL: Resctrl/PMU difference %.1f%% exceeds tolerance %d%%\n",
+			       measurement_percent_diff, PMU_RESCTRL_TOLERANCE_PERCENT);
 		goto cleanup_group;
 	}
 
+	ksft_print_msg("\nPASS: Both deltas within %d%% of expected 1MB\n", DELTA_TOLERANCE_PERCENT);
 	ksft_print_msg("PASS: PMU and resctrl measurements within %.1f%% of each other\n",
-		       percent_diff);
+		       measurement_percent_diff);
 	ret = 0;
 
 cleanup_group:
 	remove_monitoring_group(group_name);
-	free(llc_resctrl);
-	free(llc_pmu);
-	free(timestamps);
 	
 	return ret;
 }
