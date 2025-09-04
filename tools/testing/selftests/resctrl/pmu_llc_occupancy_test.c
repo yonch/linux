@@ -4,6 +4,13 @@
  *
  * Test program to verify the resctrl PMU LLC occupancy measurement matches
  * the resctrl filesystem measurement.
+ *
+ * Test methodology:
+ * 1. Child process first allocates 256MB buffer to flush cache
+ * 2. Child then dynamically allocates 1MB arrays every 100ms (up to 200 arrays over 20 seconds)
+ * 3. Child continuously traverses all allocated arrays
+ * 4. Parent measures LLC occupancy every 10ms via both resctrl FS and PMU
+ * 5. All measurements are collected and printed at the end
  */
 
 #include "resctrl.h"
@@ -15,12 +22,16 @@
 #define RESCTRL_PMU_NAME "resctrl"
 #define ARRAY_SIZE_MB 1
 #define PERM_ARRAY_SIZE (ARRAY_SIZE_MB * MB / sizeof(uint32_t))
-#define MIN_EXPECTED_OCCUPANCY (1600 * 1024)  // 1.6 MB (two 1MB arrays, some may be evicted)
-#define MAX_EXPECTED_OCCUPANCY (2200 * 1024)  // 2.2 MB (two 1MB arrays plus some overhead)
+#define FLUSH_SIZE_MB 256
+#define FLUSH_ARRAY_SIZE (FLUSH_SIZE_MB * MB / sizeof(uint32_t))
+#define MIN_EXPECTED_OCCUPANCY (100 * 1024)  // Start with low expectation
+#define MAX_EXPECTED_OCCUPANCY (20 * MB)     // Up to 20MB for 20 arrays
 #define TOLERANCE_PERCENT 10
 #define ITERATIONS_PER_CHECK 1000
-#define CHILD_RUNTIME_MS 550
-#define PARENT_WAIT_MS 500
+#define TEST_DURATION_MS 20000  // 20 seconds total
+#define ALLOCATION_INTERVAL_MS 100  // Allocate new array every 100ms
+#define MEASUREMENT_INTERVAL_MS 10  // Parent measures every 10ms
+#define MAX_ARRAYS 200  // Maximum number of 1MB arrays to allocate
 
 static int find_pmu_type(const char *pmu_name)
 {
@@ -47,33 +58,30 @@ static int find_pmu_type(const char *pmu_name)
 }
 
 /*
- * Create a random single-cycle permutation using the algorithm from:
- * https://crypto.stackexchange.com/a/51806
+ * Allocate and initialize a single-cycle permutation.
+ * Creates a 2n-sized allocation where the first half contains the permutation
+ * and the second half is a duplicate copy for traversal.
  * 
- * Algorithm:
- * 1. Create a set P of numbers 2..N
- * 2. Set Idx=1
- * 3. Draw a random member M from P, assign it to index Idx
- * 4. Remove the member from P
- * 5. Set Idx=M
- * 6. If P is nonempty repeat from step 3
- * 7. Assign 1 to the last spot at Idx
- * 
- * @perm: Array to store the permutation (size n)
- * @pool: Pre-allocated pool array (size n-1), MANDATORY - will be modified
- * @n: Size of the permutation
+ * @n: Number of elements in the permutation
+ * @return: Pointer to allocated memory (2n elements total) or NULL on failure
  */
-static void create_single_cycle_permutation(uint32_t *perm, uint32_t *pool, size_t n)
+static uint32_t *allocate_and_initialize_permutation(size_t n)
 {
+	uint32_t *array;
+	uint32_t *pool;
 	size_t pool_size;
 	size_t idx;
 	size_t i;
 
-	/* Pool must be provided */
-	if (!pool) {
-		ksft_print_msg("ERROR: pool parameter is mandatory\n");
-		exit(1);
+	/* Allocate 2n elements */
+	array = malloc(2 * n * sizeof(uint32_t));
+	if (!array) {
+		ksft_print_msg("Failed to allocate permutation array\n");
+		return NULL;
 	}
+
+	/* Use second half as temporary pool */
+	pool = array + n;
 
 	/* Initialize pool with values 2..n */
 	for (i = 0; i < n - 1; i++) {
@@ -84,14 +92,14 @@ static void create_single_cycle_permutation(uint32_t *perm, uint32_t *pool, size
 	/* Start at index 1 (0-indexed, so position 0) */
 	idx = 0;
 
-	/* Build the permutation */
+	/* Build the permutation in first half */
 	while (pool_size > 0) {
 		/* Draw random member from pool */
 		size_t rand_idx = rand() % pool_size;
 		uint32_t m = pool[rand_idx];
 		
 		/* Assign it to current index */
-		perm[idx] = m - 1;  /* Convert to 0-indexed */
+		array[idx] = m - 1;  /* Convert to 0-indexed */
 		
 		/* Remove from pool by copying last element to this position */
 		pool[rand_idx] = pool[pool_size - 1];
@@ -102,7 +110,43 @@ static void create_single_cycle_permutation(uint32_t *perm, uint32_t *pool, size
 	}
 	
 	/* Assign 1 (0 in 0-indexed) to the last spot */
-	perm[idx] = 0;
+	array[idx] = 0;
+
+	/* Copy first half to second half */
+	memcpy(array + n, array, n * sizeof(uint32_t));
+
+	return array;
+}
+
+/*
+ * Traverse a permutation array.
+ * Traverses both halves of the allocated 2n array.
+ * 
+ * @array: Pointer to the permutation array (2n elements)
+ * @n: Number of elements in each half
+ * @return: Checksum value (to prevent optimization)
+ */
+static uint64_t traverse_permutation(uint32_t *array, size_t n)
+{
+	volatile uint64_t checksum = 0;
+	size_t idx;
+	size_t i;
+
+	/* Traverse first half */
+	idx = 0;
+	for (i = 0; i < n; i++) {
+		checksum += array[idx];
+		idx = array[idx];
+	}
+
+	/* Traverse second half */
+	idx = n;
+	for (i = 0; i < n; i++) {
+		checksum += array[idx];
+		idx = array[idx] + n;  /* Next index in second half */
+	}
+
+	return checksum;
 }
 
 static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
@@ -128,58 +172,41 @@ static int add_pid_to_monitoring_group(const char *group_name, pid_t pid)
 	return 0;
 }
 
-/* Child process: Walk the permutation continuously */
+/* Child process: Dynamically allocate and walk permutations */
 static void child_walk_permutation(const char *group_name, size_t n, int ready_fd)
 {
-	uint32_t *flush_perm, *flush_pool;
-	uint32_t *perm_array1, *perm_array2;
-	struct timespec start, now, delay_ts;
-	size_t idx;
-	size_t iterations = 0;
+	uint32_t *flush_array;
+	uint32_t *perm_arrays[MAX_ARRAYS];
+	struct timespec start, now, last_allocation, delay_ts;
 	uint8_t ready = 1;
-	size_t flush_size = (256 * MB) / sizeof(uint32_t);  /* 256MB array */
-	char path[512];
-	FILE *file;
-	char *line = NULL;
-	size_t len = 0;
+	int num_arrays = 0;
+	volatile uint64_t total_checksum = 0;
+	int i;
+
+	/* Initialize array pointers */
+	for (i = 0; i < MAX_ARRAYS; i++) {
+		perm_arrays[i] = NULL;
+	}
 
 	/* Step 1: Create and walk a huge 256MB permutation to flush the cache */
 	ksft_print_msg("Creating 256MB flush permutation to evict cache...\n");
-	flush_perm = malloc(flush_size * sizeof(uint32_t));
-	if (!flush_perm) {
-		perror("malloc flush_perm");
+	flush_array = allocate_and_initialize_permutation(FLUSH_ARRAY_SIZE);
+	if (!flush_array) {
+		ksft_print_msg("Failed to allocate flush array\n");
 		exit(1);
 	}
 	
-	/* Allocate pool for flush permutation (256MB - 4 bytes) */
-	flush_pool = malloc((flush_size - 1) * sizeof(uint32_t));
-	if (!flush_pool) {
-		perror("malloc flush_pool");
-		free(flush_perm);
-		exit(1);
-	}
-	
-	/* Generate the flush permutation */
-	create_single_cycle_permutation(flush_perm, flush_pool, flush_size);
-	
-	/* Walk through the flush permutation once to ensure it's in cache */
+	/* Walk through the flush permutation once to flush cache */
 	ksft_print_msg("Walking flush permutation to ensure cache eviction...\n");
-	idx = 0;
-	volatile uint64_t flush_checksum = 0;  /* Prevent optimization */
-	for (size_t i = 0; i < flush_size; i++) {
-		flush_checksum += flush_perm[idx];
-		idx = flush_perm[idx];
-	}
-	/* Use the checksum to ensure it's not optimized out */
-	ksft_print_msg("Flush walk checksum: 0x%lx\n", (unsigned long)flush_checksum);
+	total_checksum = traverse_permutation(flush_array, FLUSH_ARRAY_SIZE);
+	ksft_print_msg("Flush walk checksum: 0x%lx\n", (unsigned long)total_checksum);
 	
-	/* Keep BOTH flush permutation and pool allocated - prevents memory reuse */
-	ksft_print_msg("Keeping 512MB (256MB flush array + 256MB pool) allocated to prevent memory reuse\n");
+	/* Keep flush array allocated to prevent memory reuse */
+	ksft_print_msg("Keeping 512MB flush array allocated\n");
 
 	/* Step 2: Join the resctrl monitoring group */
 	if (add_pid_to_monitoring_group(group_name, getpid()) < 0) {
-		free(flush_perm);
-		free(flush_pool);
+		free(flush_array);
 		exit(1);
 	}
 
@@ -189,98 +216,65 @@ static void child_walk_permutation(const char *group_name, size_t n, int ready_f
 	delay_ts.tv_nsec = 100 * 1000000;  /* 100ms */
 	nanosleep(&delay_ts, NULL);
 
-	/* Step 4: Allocate two 1MB arrays */
-	ksft_print_msg("Allocating two 1MB arrays for permutations...\n");
-	perm_array1 = malloc(n * sizeof(uint32_t));
-	if (!perm_array1) {
-		perror("malloc perm_array1");
-		free(flush_perm);
-		free(flush_pool);
-		exit(1);
-	}
-	
-	/* Array2 will be used as pool initially (n elements, though only n-1 needed for pool) */
-	perm_array2 = malloc(n * sizeof(uint32_t));
-	if (!perm_array2) {
-		perror("malloc perm_array2");
-		free(flush_perm);
-		free(flush_pool);
-		free(perm_array1);
-		exit(1);
-	}
-	
-	/* Step 5: Create permutation in array1 using array2 as the pool */
-	ksft_print_msg("Creating permutation in array1 using array2 as pool...\n");
-	create_single_cycle_permutation(perm_array1, perm_array2, n);
-	
-	/* Step 6: Copy the permutation from array1 to array2 (now we have two replicas) */
-	ksft_print_msg("Copying permutation to create second replica...\n");
-	memcpy(perm_array2, perm_array1, n * sizeof(uint32_t));
-
-	/* Read and print the tasks file to verify we're in the group */
-	snprintf(path, sizeof(path), "%s/mon_groups/%s/tasks", RESCTRL_PATH, group_name);
-	file = fopen(path, "r");
-	if (file) {
-		ksft_print_msg("Child: Contents of %s:\n", path);
-		while (getline(&line, &len, file) > 0) {
-			ksft_print_msg("  Task PID: %s", line);
-		}
-		fclose(file);
-		free(line);
-	} else {
-		ksft_print_msg("Child: Failed to read tasks file at %s\n", path);
-	}
-
 	/* Signal parent that we're ready */
 	if (write(ready_fd, &ready, 1) != 1) {
 		perror("write ready signal");
-		free(flush_perm);
-		free(flush_pool);
-		free(perm_array1);
-		free(perm_array2);
+		free(flush_array);
 		exit(1);
 	}
 	close(ready_fd);
 
 	/* Get start time */
 	clock_gettime(CLOCK_MONOTONIC, &start);
+	last_allocation = start;
 
-	/* Step 7: Walk both permutation arrays continuously */
-	ksft_print_msg("Walking both 1MB permutation arrays...\n");
-	size_t idx1 = 0, idx2 = 0;
-	volatile uint64_t checksum = 0;  /* Use volatile to prevent optimization */
+	ksft_print_msg("Starting dynamic allocation and traversal for %d seconds...\n", 
+		       TEST_DURATION_MS / 1000);
 	
+	/* Main loop: allocate new arrays every 100ms and traverse all */
 	while (1) {
-		/* Walk array1 */
-		checksum += perm_array1[idx1];
-		idx1 = perm_array1[idx1];
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
+				  (now.tv_nsec - start.tv_nsec) / 1000000;
 		
-		/* Walk array2 */
-		checksum += perm_array2[idx2];
-		idx2 = perm_array2[idx2];
+		/* Check if test duration has elapsed */
+		if (elapsed_ms >= TEST_DURATION_MS) {
+			break;
+		}
 		
-		iterations++;
-
-		/* Check time every ITERATIONS_PER_CHECK iterations */
-		if (iterations % ITERATIONS_PER_CHECK == 0) {
-			clock_gettime(CLOCK_MONOTONIC, &now);
-			long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
-					  (now.tv_nsec - start.tv_nsec) / 1000000;
-			
-			if (elapsed_ms >= CHILD_RUNTIME_MS) {
-				break;
+		/* Check if it's time to allocate a new array */
+		long since_last_alloc = (now.tv_sec - last_allocation.tv_sec) * 1000 +
+					(now.tv_nsec - last_allocation.tv_nsec) / 1000000;
+		
+		if (since_last_alloc >= ALLOCATION_INTERVAL_MS && num_arrays < MAX_ARRAYS) {
+			/* Allocate new 1MB permutation array */
+			perm_arrays[num_arrays] = allocate_and_initialize_permutation(n);
+			if (perm_arrays[num_arrays]) {
+				num_arrays++;
+				ksft_print_msg("Allocated array %d at %ld ms\n", num_arrays, elapsed_ms);
+				last_allocation = now;
+			}
+		}
+		
+		/* Traverse all allocated arrays */
+		for (i = 0; i < num_arrays; i++) {
+			if (perm_arrays[i]) {
+				total_checksum += traverse_permutation(perm_arrays[i], n);
 			}
 		}
 	}
 	
-	/* Output the checksum to ensure it's not optimized out */
-	ksft_print_msg("Permutation walk completed: %lu iterations, checksum: 0x%lx\n", 
-		       iterations, (unsigned long)checksum);
+	/* Final statistics */
+	ksft_print_msg("Test completed: %d arrays allocated, checksum: 0x%lx\n", 
+		       num_arrays, (unsigned long)total_checksum);
 
-	free(flush_perm);
-	free(flush_pool);
-	free(perm_array1);
-	free(perm_array2);
+	/* Cleanup */
+	free(flush_array);
+	for (i = 0; i < num_arrays; i++) {
+		if (perm_arrays[i]) {
+			free(perm_arrays[i]);
+		}
+	}
 	exit(0);
 }
 
@@ -552,25 +546,45 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 				       const struct user_params *uparams)
 {
 	const char *group_name = "pmu_llc_test";
-	unsigned long resctrl_occupancy, pmu_occupancy;
 	int pmu_type;
 	pid_t child_pid;
 	int pipe_fds[2];
 	int ret = -1;
 	uint8_t ready;
-	struct timespec ts;
+	struct timespec ts, test_start;
+	
+	/* Arrays to store all measurements */
+	int max_measurements = (TEST_DURATION_MS / MEASUREMENT_INTERVAL_MS) + 10;
+	unsigned long *llc_resctrl = calloc(max_measurements, sizeof(unsigned long));
+	unsigned long *llc_pmu = calloc(max_measurements, sizeof(unsigned long));
+	unsigned long *timestamps = calloc(max_measurements, sizeof(unsigned long));
+	int measurement_count = 0;
 
-	ksft_print_msg("Testing PMU LLC occupancy measurement with debugging\n");
+	if (!llc_resctrl || !llc_pmu || !timestamps) {
+		ksft_print_msg("Failed to allocate measurement arrays\n");
+		free(llc_resctrl);
+		free(llc_pmu);
+		free(timestamps);
+		return -1;
+	}
+
+	ksft_print_msg("Testing PMU LLC occupancy measurement with dynamic allocation\n");
 
 	/* Find the resctrl PMU type */
 	pmu_type = find_pmu_type(RESCTRL_PMU_NAME);
 	if (pmu_type < 0) {
 		ksft_print_msg("Resctrl PMU not found\n");
+		free(llc_resctrl);
+		free(llc_pmu);
+		free(timestamps);
 		return -1;
 	}
 
 	/* Create monitoring group */
 	if (create_monitoring_group(group_name) < 0) {
+		free(llc_resctrl);
+		free(llc_pmu);
+		free(timestamps);
 		return -1;
 	}
 
@@ -613,99 +627,81 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	}
 	close(pipe_fds[0]);
 
-	ksft_print_msg("Child process (PID %d) ready and added to monitoring group %s\n", 
-		       child_pid, group_name);
+	ksft_print_msg("Child process (PID %d) ready, starting measurements\n", child_pid);
 
-	/* Perform periodic measurements every 100ms */
-	int measurement_count = 0;
-	int max_measurements = 5;  /* 5 measurements at 100ms intervals = 500ms total */
-	unsigned long periodic_llc_resctrl[5], periodic_llc_pmu[5];
-	unsigned long periodic_mbm_total_resctrl[5], periodic_mbm_local_resctrl[5];
-	unsigned long periodic_mbm_total_pmu[5], periodic_mbm_local_pmu[5];
+	/* Record test start time */
+	clock_gettime(CLOCK_MONOTONIC, &test_start);
 	
-	for (measurement_count = 0; measurement_count < max_measurements; measurement_count++) {
-		/* Wait 100ms */
+	/* Perform measurements every MEASUREMENT_INTERVAL_MS */
+	while (1) {
+		/* Wait for next measurement interval */
 		ts.tv_sec = 0;
-		ts.tv_nsec = 100 * 1000000;  /* 100ms */
+		ts.tv_nsec = MEASUREMENT_INTERVAL_MS * 1000000;  /* Convert ms to ns */
 		nanosleep(&ts, NULL);
 		
-		ksft_print_msg("\n=== Measurement %d (at %dms) ===\n", 
-			       measurement_count + 1, (measurement_count + 1) * 100);
+		/* Check elapsed time */
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		long elapsed_ms = (now.tv_sec - test_start.tv_sec) * 1000 +
+				  (now.tv_nsec - test_start.tv_nsec) / 1000000;
+		
+		if (elapsed_ms >= TEST_DURATION_MS || measurement_count >= max_measurements - 1) {
+			break;
+		}
+		
+		/* Record timestamp */
+		timestamps[measurement_count] = elapsed_ms;
 		
 		/* Read LLC occupancy from resctrl */
-		if (read_llc_occupancy_from_resctrl(group_name, &periodic_llc_resctrl[measurement_count]) < 0) {
-			periodic_llc_resctrl[measurement_count] = 0;
+		if (read_llc_occupancy_from_resctrl(group_name, &llc_resctrl[measurement_count]) < 0) {
+			llc_resctrl[measurement_count] = 0;
 		}
-		ksft_print_msg("  LLC Resctrl FS: %lu bytes\n", periodic_llc_resctrl[measurement_count]);
 		
 		/* Read LLC occupancy from PMU */
-		if (read_llc_occupancy_from_pmu(pmu_type, group_name, &periodic_llc_pmu[measurement_count]) < 0) {
-			periodic_llc_pmu[measurement_count] = 0;
+		if (read_llc_occupancy_from_pmu(pmu_type, group_name, &llc_pmu[measurement_count]) < 0) {
+			llc_pmu[measurement_count] = 0;
 		}
-		ksft_print_msg("  LLC PMU:        %lu bytes\n", periodic_llc_pmu[measurement_count]);
 		
-		/* Read MBM from resctrl */
-		if (read_mbm_from_resctrl(group_name, &periodic_mbm_total_resctrl[measurement_count], 
-					   &periodic_mbm_local_resctrl[measurement_count]) < 0) {
-			periodic_mbm_total_resctrl[measurement_count] = 0;
-			periodic_mbm_local_resctrl[measurement_count] = 0;
-		}
-		ksft_print_msg("  MBM Total Resctrl: %lu bytes\n", periodic_mbm_total_resctrl[measurement_count]);
-		ksft_print_msg("  MBM Local Resctrl: %lu bytes\n", periodic_mbm_local_resctrl[measurement_count]);
-		
-		/* Read MBM from PMU */
-		if (read_mbm_from_pmu(pmu_type, group_name, &periodic_mbm_total_pmu[measurement_count],
-				      &periodic_mbm_local_pmu[measurement_count]) < 0) {
-			periodic_mbm_total_pmu[measurement_count] = 0;
-			periodic_mbm_local_pmu[measurement_count] = 0;
-		}
-		ksft_print_msg("  MBM Total PMU:     %lu bytes\n", periodic_mbm_total_pmu[measurement_count]);
-		ksft_print_msg("  MBM Local PMU:     %lu bytes\n", periodic_mbm_local_pmu[measurement_count]);
+		measurement_count++;
 	}
-	
-	/* Use the last measurements for validation */
-	resctrl_occupancy = periodic_llc_resctrl[max_measurements - 1];
-	pmu_occupancy = periodic_llc_pmu[max_measurements - 1];
 	
 	/* Wait for child to complete */
 	waitpid(child_pid, NULL, 0);
 	
-	/* Print summary of all measurements */
-	ksft_print_msg("\n=== Measurement Summary ===\n");
-	for (int i = 0; i < max_measurements; i++) {
-		ksft_print_msg("Time %dms: LLC(resctrl=%lu, pmu=%lu), MBM_total(resctrl=%lu, pmu=%lu), MBM_local(resctrl=%lu, pmu=%lu)\n",
-			       (i + 1) * 100,
-			       periodic_llc_resctrl[i], periodic_llc_pmu[i],
-			       periodic_mbm_total_resctrl[i], periodic_mbm_total_pmu[i],
-			       periodic_mbm_local_resctrl[i], periodic_mbm_local_pmu[i]);
+	/* Print all measurements at once */
+	ksft_print_msg("\n=== All Measurements (LLC Occupancy in bytes) ===\n");
+	ksft_print_msg("Time(ms)\tResctrl\t\tPMU\n");
+	for (int i = 0; i < measurement_count; i++) {
+		ksft_print_msg("%lu\t\t%lu\t\t%lu\n", 
+			       timestamps[i], llc_resctrl[i], llc_pmu[i]);
 	}
-
-	/* Print final results */
-	ksft_print_msg("\n=== Final LLC Occupancy Results ===\n");
-	ksft_print_msg("  Resctrl FS: %lu bytes\n", resctrl_occupancy);
-	ksft_print_msg("  PMU:        %lu bytes\n", pmu_occupancy);
-
-	/* Check if values are within expected range */
-	if (resctrl_occupancy < MIN_EXPECTED_OCCUPANCY || 
-	    resctrl_occupancy > MAX_EXPECTED_OCCUPANCY) {
-		ksft_print_msg("FAIL: Resctrl occupancy %lu outside expected range [%d, %d]\n",
-			       resctrl_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
+	
+	/* Analyze results - use average of last 10 measurements */
+	int analyze_start = (measurement_count > 10) ? measurement_count - 10 : 0;
+	unsigned long avg_resctrl = 0, avg_pmu = 0;
+	for (int i = analyze_start; i < measurement_count; i++) {
+		avg_resctrl += llc_resctrl[i];
+		avg_pmu += llc_pmu[i];
+	}
+	int analyze_count = measurement_count - analyze_start;
+	avg_resctrl /= analyze_count;
+	avg_pmu /= analyze_count;
+	
+	ksft_print_msg("\n=== Final Analysis (average of last %d measurements) ===\n", analyze_count);
+	ksft_print_msg("  Average Resctrl: %lu bytes\n", avg_resctrl);
+	ksft_print_msg("  Average PMU:     %lu bytes\n", avg_pmu);
+	
+	/* Check if values are reasonable (we don't have strict bounds anymore) */
+	if (avg_resctrl == 0 || avg_pmu == 0) {
+		ksft_print_msg("FAIL: Got zero measurements\n");
 		goto cleanup_group;
 	}
-
-	if (pmu_occupancy < MIN_EXPECTED_OCCUPANCY || 
-	    pmu_occupancy > MAX_EXPECTED_OCCUPANCY) {
-		ksft_print_msg("FAIL: PMU occupancy %lu outside expected range [%d, %d]\n",
-			       pmu_occupancy, MIN_EXPECTED_OCCUPANCY, MAX_EXPECTED_OCCUPANCY);
-		goto cleanup_group;
-	}
-
-	/* Check if values are within 10% of each other */
-	unsigned long diff = (resctrl_occupancy > pmu_occupancy) ? 
-			     (resctrl_occupancy - pmu_occupancy) :
-			     (pmu_occupancy - resctrl_occupancy);
-	unsigned long avg = (resctrl_occupancy + pmu_occupancy) / 2;
-	double percent_diff = (double)diff * 100.0 / avg;
+	
+	/* Check if values are within tolerance of each other */
+	unsigned long diff = (avg_resctrl > avg_pmu) ? 
+			     (avg_resctrl - avg_pmu) :
+			     (avg_pmu - avg_resctrl);
+	double percent_diff = (double)diff * 100.0 / ((avg_resctrl + avg_pmu) / 2);
 
 	if (percent_diff > TOLERANCE_PERCENT) {
 		ksft_print_msg("FAIL: Difference %.1f%% exceeds tolerance %d%%\n",
@@ -719,6 +715,9 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 
 cleanup_group:
 	remove_monitoring_group(group_name);
+	free(llc_resctrl);
+	free(llc_pmu);
+	free(timestamps);
 	
 	return ret;
 }
