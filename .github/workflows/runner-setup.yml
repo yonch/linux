@@ -28,6 +28,11 @@ on:
         required: false
         default: '20'
         type: string
+      iam-role-name:
+        description: 'IAM role name for the EC2 instance'
+        required: false
+        default: ''
+        type: string
     outputs:
       runner-label:
         description: 'Label of the runner to use in runs-on'
@@ -91,6 +96,7 @@ jobs:
           instance-type: ${{ inputs.instance-type }}
           image-type: ${{ inputs.image-type }}
           volume-size: ${{ inputs.volume-size }}
+          iam-role-name: ${{ inputs.iam-role-name }}
           packages: '["kexec-tools", "curl", "jq", "gh", "build-essential"]'
           label: ${{ steps.generate-label.outputs.label }}
 
