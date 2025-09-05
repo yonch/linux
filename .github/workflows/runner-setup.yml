@@ -23,6 +23,11 @@ on:
         required: false
         default: 60
         type: number
+      volume-size:
+        description: 'EBS volume size in GB'
+        required: false
+        default: '20'
+        type: string
     outputs:
       runner-label:
         description: 'Label of the runner to use in runs-on'
@@ -88,7 +93,7 @@ jobs:
           aws-role-arn: ${{ secrets.aws-role-arn }}
           instance-type: ${{ inputs.instance-type }}
           image-type: ${{ inputs.image-type }}
-          volume-size: '20'
+          volume-size: ${{ inputs.volume-size }}
           packages: '["kexec-tools", "curl", "jq", "gh", "build-essential"]'
           label: ${{ steps.generate-label.outputs.label }}
 
