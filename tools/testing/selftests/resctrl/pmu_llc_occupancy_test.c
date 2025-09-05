@@ -675,10 +675,6 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	ksft_print_msg("Parent: Final - Resctrl: %lu bytes, PMU: %lu bytes\n", 
 		       final_resctrl, final_pmu);
 	
-	/* Wait for child to complete */
-	waitpid(child_pid, NULL, 0);
-	child_pid = -1;  /* Mark child as already reaped */
-	
 	/* Calculate deltas */
 	delta_resctrl = final_resctrl - baseline_resctrl;
 	delta_pmu = final_pmu - baseline_pmu;
