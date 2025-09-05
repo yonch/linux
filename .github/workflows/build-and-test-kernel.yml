@@ -44,7 +44,6 @@ jobs:
     timeout-minutes: 120
     outputs:
       release-tag: ${{ steps.release_info.outputs.release_tag }}
-      kernel-version: ${{ steps.release_info.outputs.kernel_version }}
     steps:
       - name: Verify system info
         run: |
@@ -666,7 +665,6 @@ jobs:
           echo "================================================"
           echo ""
           echo "📍 Kernel version: $(uname -r)"
-          echo "📍 Expected version: ${{ needs.get-test-runner.outputs.kernel-version }}"
           echo "📍 Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
           echo "⏰ System uptime: $(uptime)"
           echo "📅 Date: $(date)"
@@ -749,7 +747,6 @@ jobs:
           echo "📊 Test Results Summary"
           echo "======================="
           echo "Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
-          echo "Kernel version: ${{ needs.get-test-runner.outputs.kernel-version }}"
           echo "Test exit code: ${{ steps.run_pmu_test.outcome }}"
           
           echo ""
