@@ -632,9 +632,9 @@ jobs:
 
   # Use reusable workflow to get a runner with custom kernel
   get-test-runner:
-    name: Get Test Runner with Custom Kernel
+    name: Setup Runner
     needs: build-kernel
-    uses: ./.github/workflows/runner-with-kernel.yml
+    uses: ./.github/workflows/runner-setup.yml
     with:
       kernel-release-tag: ${{ needs.build-kernel.outputs.release-tag }}
       instance-type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
