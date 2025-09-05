@@ -10,9 +10,9 @@
  * 2. Child joins resctrl monitoring group
  * 3. Child allocates and traverses 4MB buffer to fill L2 cache and spill to L3
  * 4. Parent creates cache pressure, waits 2ms, takes baseline LLC measurement
- * 5. Child allocates 1MB buffer and traverses both buffers for 100ms
+ * 5. Child allocates 5MB buffer and traverses both buffers for 100ms
  * 6. Parent waits 50ms, creates cache pressure, waits 2ms, takes final measurement
- * 7. Verify delta is 1MB ± 15% and resctrl/PMU within 10% of each other
+ * 7. Verify delta is 5MB ± 15% and resctrl/PMU within 10% of each other
  */
 
 #include "resctrl.h"
@@ -27,7 +27,7 @@
 #define FLUSH_ARRAY_SIZE (FLUSH_SIZE_MB * MB / sizeof(uint32_t))
 #define INITIAL_BUFFER_SIZE_MB 4
 #define INITIAL_ARRAY_SIZE (INITIAL_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
-#define TEST_BUFFER_SIZE_MB 1
+#define TEST_BUFFER_SIZE_MB 5
 #define TEST_ARRAY_SIZE (TEST_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
 #define MEASUREMENT_DELAY_MS 50
 #define DELTA_TOLERANCE_PERCENT 15
@@ -239,22 +239,22 @@ static void child_walk_permutation(const char *group_name, int ready_fd, int pro
 	}
 	close(proceed_fd);
 
-	/* Phase 3: Allocate 1MB test buffer */
-	ksft_print_msg("Child: Allocating 1MB test buffer...\n");
+	/* Phase 3: Allocate 5MB test buffer */
+	ksft_print_msg("Child: Allocating 5MB test buffer...\n");
 	test_array = allocate_and_initialize_permutation(TEST_ARRAY_SIZE / 2);  /* Half size for each permutation half */
 	if (!test_array) {
 		ksft_print_msg("Failed to allocate test array\n");
 		exit(1);
 	}
 	
-	/* Traverse both 4MB and 1MB buffers until killed by parent */
-	ksft_print_msg("Child: Continuously traversing 4MB and 1MB buffers until killed...\n");
+	/* Traverse both 4MB and 5MB buffers until killed by parent */
+	ksft_print_msg("Child: Continuously traversing 4MB and 5MB buffers until killed...\n");
 	
 	while (1) {
 		/* Traverse 4MB buffer */
 		total_checksum += traverse_permutation(initial_array, INITIAL_ARRAY_SIZE);
 		
-		/* Traverse 1MB buffer */
+		/* Traverse 5MB buffer */
 		total_checksum += traverse_permutation(test_array, TEST_ARRAY_SIZE / 2);
 	}
 	
@@ -637,7 +637,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	ksft_print_msg("Parent: Baseline - Resctrl: %lu bytes, PMU: %lu bytes\n", 
 		       baseline_resctrl, baseline_pmu);
 
-	/* Step 4: Signal child to allocate 1MB buffer and start traversing */
+	/* Step 4: Signal child to allocate 5MB buffer and start traversing */
 	ksft_print_msg("Parent: Signaling child to proceed with test...\n");
 	if (write(proceed_pipe[1], &proceed, 1) != 1) {
 		perror("write proceed signal");
@@ -687,10 +687,10 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 	ksft_print_msg("Delta    - Resctrl: %lu bytes, PMU: %lu bytes\n", 
 		       delta_resctrl, delta_pmu);
 	
-	/* Expected delta is 1MB */
+	/* Expected delta is 5MB */
 	unsigned long expected_delta = TEST_BUFFER_SIZE_MB * MB;
 	
-	/* Check if deltas are within 15% of expected 1MB */
+	/* Check if deltas are within 15% of expected 5MB */
 	unsigned long resctrl_diff = (delta_resctrl > expected_delta) ? 
 				      (delta_resctrl - expected_delta) :
 				      (expected_delta - delta_resctrl);
@@ -701,7 +701,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 				  (expected_delta - delta_pmu);
 	double pmu_percent_diff = (double)pmu_diff * 100.0 / expected_delta;
 	
-	ksft_print_msg("\nDelta vs Expected (1MB):\n");
+	ksft_print_msg("\nDelta vs Expected (5MB):\n");
 	ksft_print_msg("  Resctrl delta: %.1f%% difference from expected\n", resctrl_percent_diff);
 	ksft_print_msg("  PMU delta:     %.1f%% difference from expected\n", pmu_percent_diff);
 	
@@ -732,7 +732,7 @@ static int pmu_llc_occupancy_run_test(const struct resctrl_test *test,
 		goto cleanup_child;
 	}
 
-	ksft_print_msg("\nPASS: Both deltas within %d%% of expected 1MB\n", DELTA_TOLERANCE_PERCENT);
+	ksft_print_msg("\nPASS: Both deltas within %d%% of expected 5MB\n", DELTA_TOLERANCE_PERCENT);
 	ksft_print_msg("PASS: PMU and resctrl measurements within %.1f%% of each other\n",
 		       measurement_percent_diff);
 	ret = 0;
