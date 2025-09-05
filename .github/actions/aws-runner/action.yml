@@ -37,10 +37,10 @@ inputs:
     description: 'Custom resource tags in JSON format'
     required: false
     default: ''
-  runner-name-prefix:
-    description: 'Prefix for the runner name'
+  label:
+    description: 'Custom label for the runner (auto-generated if not provided)'
     required: false
-    default: 'github-runner'
+    default: ''
   iam-role-name:
     description: 'IAM role name for the EC2 instance'
     required: false
@@ -222,6 +222,7 @@ runs:
         startup-quiet-period-seconds: 10
         startup-retry-interval-seconds: 5
         github-token: ${{ inputs.github-token }}
+        label: ${{ inputs.label }}
         ec2-instance-type: ${{ inputs.instance-type }}
         market-type: ${{ inputs.market-type }}
         ec2-volume-size: ${{ inputs.volume-size }}
@@ -232,7 +233,7 @@ runs:
         packages: ${{ inputs.packages }}
         aws-resource-tags: >
           [
-            {"Key": "Name", "Value": "${{ inputs.runner-name-prefix }}"},
+            {"Key": "Name", "Value": "${{ inputs.label || 'auto-generated' }}"},
             {"Key": "Repository", "Value": "${{ github.repository }}"},
             {"Key": "Workflow", "Value": "${{ github.workflow }}"},
             {"Key": "RunId", "Value": "${{ github.run_id }}"},

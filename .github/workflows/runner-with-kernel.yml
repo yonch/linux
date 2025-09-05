@@ -26,7 +26,7 @@ on:
     outputs:
       runner-label:
         description: 'Label of the runner to use in runs-on'
-        value: ${{ jobs.setup-runner.outputs.final-runner-label }}
+        value: ${{ inputs.kernel-release-tag == 'default' && jobs.start-ec2.outputs.runner-label || jobs.setup-runner.outputs.final-runner-label }}
       ec2-instance-id:
         description: 'EC2 instance ID for cleanup'
         value: ${{ jobs.start-ec2.outputs.ec2-instance-id }}
@@ -35,7 +35,7 @@ on:
         value: ${{ jobs.start-ec2.outputs.region }}
       kernel-version:
         description: 'Version of the kernel running on the runner'
-        value: ${{ jobs.setup-runner.outputs.kernel-version }}
+        value: ${{ inputs.kernel-release-tag == 'default' && jobs.default-kernel-setup.outputs.kernel-version || jobs.setup-runner.outputs.kernel-version }}
     secrets:
       github-token:
         description: 'GitHub token for API access'
@@ -52,7 +52,7 @@ jobs:
     name: Start EC2 Instance
     runs-on: ubuntu-latest
     outputs:
-      initial-runner-label: ${{ steps.start-runner.outputs.runner-label }}
+      runner-label: ${{ steps.start-runner.outputs.runner-label }}
       ec2-instance-id: ${{ steps.start-runner.outputs.ec2-instance-id }}
       region: ${{ steps.start-runner.outputs.region }}
     steps:
@@ -64,13 +64,21 @@ jobs:
             .github/
           sparse-checkout-cone-mode: false
       
-      - name: Generate unique runner label
+      - name: Generate runner label
         id: generate-label
         run: |
           TIMESTAMP=$(date +%s)
-          INITIAL_LABEL="temp-${{ github.run_id }}-${TIMESTAMP}"
-          echo "initial-label=${INITIAL_LABEL}" >> $GITHUB_OUTPUT
-          echo "Generated initial runner label: ${INITIAL_LABEL}"
+          if [[ "${{ inputs.kernel-release-tag }}" == "default" ]]; then
+            # For default kernel, generate a single label
+            LABEL="default-kernel-${{ github.run_id }}-${TIMESTAMP}"
+            echo "label=${LABEL}" >> $GITHUB_OUTPUT
+            echo "Generated runner label: ${LABEL}"
+          else
+            # For custom kernel, generate kexec label
+            LABEL="kexec-temp-${{ github.run_id }}-${TIMESTAMP}"
+            echo "label=${LABEL}" >> $GITHUB_OUTPUT
+            echo "Generated kexec runner label: ${LABEL}"
+          fi
       
       - name: Start AWS Runner
         id: start-runner
@@ -82,12 +90,13 @@ jobs:
           image-type: ${{ inputs.image-type }}
           volume-size: '20'
           packages: '["kexec-tools", "curl", "jq", "gh", "build-essential"]'
-          runner-name-prefix: ${{ steps.generate-label.outputs.initial-label }}
+          label: ${{ steps.generate-label.outputs.label }}
 
   setup-runner:
     name: Setup Runner with Kernel
     needs: start-ec2
-    runs-on: ${{ needs.start-ec2.outputs.initial-runner-label }}
+    runs-on: ${{ needs.start-ec2.outputs.runner-label }}
+    if: inputs.kernel-release-tag != 'default'
     outputs:
       final-runner-label: ${{ steps.determine-label.outputs.final-label }}
       kernel-version: ${{ steps.kernel-info.outputs.version }}
@@ -172,12 +181,12 @@ jobs:
         if: steps.kernel-mode.outputs.mode == 'custom'
         id: prepare-kexec
         run: |
-          # Generate final runner label
+          # Generate final runner label for custom kernel
           TIMESTAMP=$(date +%s)
           KERNEL_TAG="${{ inputs.kernel-release-tag }}"
           # Sanitize kernel tag for use in label
           SAFE_TAG=$(echo "$KERNEL_TAG" | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-50)
-          FINAL_LABEL="runner-${SAFE_TAG}-${{ github.run_id }}-${TIMESTAMP}"
+          FINAL_LABEL="kernel-${SAFE_TAG}-${{ github.run_id }}-${TIMESTAMP}"
           echo "final-label=${FINAL_LABEL}" >> $GITHUB_OUTPUT
           echo "Final runner label: ${FINAL_LABEL}"
           
@@ -316,15 +325,9 @@ jobs:
         id: determine-label
         if: always()
         run: |
-          if [[ "${{ steps.kernel-mode.outputs.mode }}" == "default" ]]; then
-            # For default mode, use the initial runner label as final
-            echo "final-label=${{ needs.start-ec2.outputs.initial-runner-label }}" >> $GITHUB_OUTPUT
-            echo "needs-cleanup=false" >> $GITHUB_OUTPUT
-          else
-            # For custom mode, use the prepared final label
-            echo "final-label=${{ steps.prepare-kexec.outputs.final-label }}" >> $GITHUB_OUTPUT
-            echo "needs-cleanup=true" >> $GITHUB_OUTPUT
-          fi
+          # For custom mode, use the prepared final label
+          echo "final-label=${{ steps.prepare-kexec.outputs.final-label }}" >> $GITHUB_OUTPUT
+          echo "needs-cleanup=true" >> $GITHUB_OUTPUT
       
       - name: Store kernel info
         id: kernel-info
@@ -339,7 +342,7 @@ jobs:
   wait-for-kexec:
     name: Wait for Custom Kernel Runner
     needs: [start-ec2, setup-runner]
-    if: needs.setup-runner.outputs.needs-cleanup == 'true'
+    if: inputs.kernel-release-tag != 'default'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -378,15 +381,29 @@ jobs:
           chmod +x .github/scripts/runner-registration.sh
           .github/scripts/runner-registration.sh remove \
             "${{ secrets.repo-admin-token }}" \
-            "${{ needs.start-ec2.outputs.initial-runner-label }}" || true
+            "${{ needs.start-ec2.outputs.runner-label }}" || true
           
           echo "Initial runner removed"
 
+  default-kernel-setup:
+    name: Setup Default Kernel Runner
+    needs: start-ec2
+    if: inputs.kernel-release-tag == 'default'
+    runs-on: ubuntu-latest
+    outputs:
+      kernel-version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Get default kernel version
+        id: get-version
+        run: |
+          echo "version=default" >> $GITHUB_OUTPUT
+          echo "Using default kernel - no additional setup required"
+  
   # Internal cleanup job - only runs on failure
   internal-cleanup:
     name: Internal Cleanup on Failure
-    needs: [start-ec2, setup-runner, wait-for-kexec]
-    if: failure() || cancelled()
+    needs: [start-ec2, setup-runner, wait-for-kexec, default-kernel-setup]
+    if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -397,18 +414,18 @@ jobs:
             .github/
           sparse-checkout-cone-mode: false
       
-      - name: Remove initial runner
-        if: needs.start-ec2.outputs.initial-runner-label
+      - name: Remove runner
+        if: needs.start-ec2.outputs.runner-label
         continue-on-error: true
         run: |
-          echo "Cleaning up initial runner..."
+          echo "Cleaning up runner..."
           chmod +x .github/scripts/runner-registration.sh
           .github/scripts/runner-registration.sh remove \
             "${{ secrets.repo-admin-token }}" \
-            "${{ needs.start-ec2.outputs.initial-runner-label }}" || true
+            "${{ needs.start-ec2.outputs.runner-label }}" || true
       
-      - name: Remove final runner
-        if: needs.setup-runner.outputs.final-runner-label && needs.setup-runner.outputs.needs-cleanup == 'true'
+      - name: Remove final runner (custom kernel)
+        if: needs.setup-runner.outputs.final-runner-label && inputs.kernel-release-tag != 'default'
         continue-on-error: true
         run: |
           echo "Cleaning up final runner..."
@@ -421,7 +438,7 @@ jobs:
         if: needs.start-ec2.outputs.ec2-instance-id
         uses: ./.github/actions/aws-runner/cleanup
         with:
-          runner-label: ${{ needs.start-ec2.outputs.initial-runner-label }}
+          runner-label: ${{ needs.start-ec2.outputs.runner-label }}
           ec2-instance-id: ${{ needs.start-ec2.outputs.ec2-instance-id }}
           github-token: ${{ secrets.repo-admin-token }}
           aws-role-arn: ${{ secrets.aws-role-arn }}
