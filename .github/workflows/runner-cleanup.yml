@@ -1,0 +1,80 @@
+name: 'Reusable: Cleanup Runner'
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: 'Label of the runner to remove'
+        required: true
+        type: string
+      ec2-instance-id:
+        description: 'EC2 instance ID to terminate'
+        required: true
+        type: string
+      region:
+        description: 'AWS region where the instance is located'
+        required: true
+        type: string
+    secrets:
+      github-token:
+        description: 'GitHub token for API access'
+        required: true
+      aws-role-arn:
+        description: 'AWS role ARN for EC2 operations'
+        required: true
+      repo-admin-token:
+        description: 'Repository admin token for runner management'
+        required: true
+
+jobs:
+  cleanup:
+    name: Cleanup Runner and EC2 Instance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: yonch/linux
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Remove GitHub runner
+        id: remove-runner
+        continue-on-error: true
+        run: |
+          echo "Removing GitHub runner with label: ${{ inputs.runner-label }}"
+          
+          chmod +x .github/scripts/runner-registration.sh
+          
+          if .github/scripts/runner-registration.sh remove \
+            "${{ secrets.repo-admin-token }}" \
+            "${{ inputs.runner-label }}"; then
+            echo "Runner removed successfully"
+            echo "status=removed" >> $GITHUB_OUTPUT
+          else
+            echo "Runner not found or already removed"
+            echo "status=not_found" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Terminate EC2 instance
+        uses: ./.github/actions/aws-runner/cleanup
+        with:
+          runner-label: ${{ inputs.runner-label }}
+          ec2-instance-id: ${{ inputs.ec2-instance-id }}
+          github-token: ${{ secrets.repo-admin-token }}
+          aws-role-arn: ${{ secrets.aws-role-arn }}
+          aws-region: ${{ inputs.region }}
+      
+      - name: Cleanup summary
+        if: always()
+        run: |
+          echo "=============================="
+          echo "Cleanup Summary"
+          echo "=============================="
+          echo "Runner Label: ${{ inputs.runner-label }}"
+          echo "Runner Status: ${{ steps.remove-runner.outputs.status || 'unknown' }}"
+          echo "EC2 Instance: ${{ inputs.ec2-instance-id }}"
+          echo "Region: ${{ inputs.region }}"
+          echo "=============================="
