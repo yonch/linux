@@ -1,0 +1,428 @@
+name: 'Reusable: Spin Up Runner with Kernel'
+
+on:
+  workflow_call:
+    inputs:
+      kernel-release-tag:
+        description: 'GitHub release tag for kernel artifacts, or "default" for standard kernel'
+        required: false
+        default: 'default'
+        type: string
+      instance-type:
+        description: 'EC2 instance type'
+        required: false
+        default: 'm7i.metal-24xl'
+        type: string
+      image-type:
+        description: 'Ubuntu image type (ubuntu-22.04 or ubuntu-24.04)'
+        required: false
+        default: 'ubuntu-24.04'
+        type: string
+      runner-timeout-minutes:
+        description: 'Maximum lifetime of the runner in minutes'
+        required: false
+        default: 60
+        type: number
+    outputs:
+      runner-label:
+        description: 'Label of the runner to use in runs-on'
+        value: ${{ jobs.setup-runner.outputs.final-runner-label }}
+      ec2-instance-id:
+        description: 'EC2 instance ID for cleanup'
+        value: ${{ jobs.start-ec2.outputs.ec2-instance-id }}
+      region:
+        description: 'AWS region where instance was created'
+        value: ${{ jobs.start-ec2.outputs.region }}
+      kernel-version:
+        description: 'Version of the kernel running on the runner'
+        value: ${{ jobs.setup-runner.outputs.kernel-version }}
+    secrets:
+      github-token:
+        description: 'GitHub token for API access'
+        required: true
+      aws-role-arn:
+        description: 'AWS role ARN for EC2 operations'
+        required: true
+      repo-admin-token:
+        description: 'Repository admin token for runner management'
+        required: true
+
+jobs:
+  start-ec2:
+    name: Start EC2 Instance
+    runs-on: ubuntu-latest
+    outputs:
+      initial-runner-label: ${{ steps.start-runner.outputs.runner-label }}
+      ec2-instance-id: ${{ steps.start-runner.outputs.ec2-instance-id }}
+      region: ${{ steps.start-runner.outputs.region }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: yonch/linux
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Generate unique runner label
+        id: generate-label
+        run: |
+          TIMESTAMP=$(date +%s)
+          INITIAL_LABEL="temp-${{ github.run_id }}-${TIMESTAMP}"
+          echo "initial-label=${INITIAL_LABEL}" >> $GITHUB_OUTPUT
+          echo "Generated initial runner label: ${INITIAL_LABEL}"
+      
+      - name: Start AWS Runner
+        id: start-runner
+        uses: ./.github/actions/aws-runner
+        with:
+          github-token: ${{ secrets.repo-admin-token }}
+          aws-role-arn: ${{ secrets.aws-role-arn }}
+          instance-type: ${{ inputs.instance-type }}
+          image-type: ${{ inputs.image-type }}
+          volume-size: '20'
+          packages: '["kexec-tools", "curl", "jq", "gh", "build-essential"]'
+          runner-name-prefix: ${{ steps.generate-label.outputs.initial-label }}
+
+  setup-runner:
+    name: Setup Runner with Kernel
+    needs: start-ec2
+    runs-on: ${{ needs.start-ec2.outputs.initial-runner-label }}
+    outputs:
+      final-runner-label: ${{ steps.determine-label.outputs.final-label }}
+      kernel-version: ${{ steps.kernel-info.outputs.version }}
+      needs-cleanup: ${{ steps.determine-label.outputs.needs-cleanup }}
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: yonch/linux
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Check kernel mode
+        id: kernel-mode
+        run: |
+          if [[ "${{ inputs.kernel-release-tag }}" == "default" ]]; then
+            echo "mode=default" >> $GITHUB_OUTPUT
+            echo "Using default kernel - no kexec needed"
+          else
+            echo "mode=custom" >> $GITHUB_OUTPUT
+            echo "Will kexec into custom kernel from release: ${{ inputs.kernel-release-tag }}"
+          fi
+      
+      - name: Get kernel version (default mode)
+        if: steps.kernel-mode.outputs.mode == 'default'
+        id: default-kernel-info
+        run: |
+          KERNEL_VERSION=$(uname -r)
+          echo "version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
+          echo "Kernel version: ${KERNEL_VERSION}"
+      
+      - name: Download and setup custom kernel
+        if: steps.kernel-mode.outputs.mode == 'custom'
+        id: setup-custom-kernel
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          echo "Downloading kernel artifacts from release: ${{ inputs.kernel-release-tag }}"
+          
+          RELEASE_TAG="${{ inputs.kernel-release-tag }}"
+          
+          mkdir -p /tmp/kernel
+          cd /tmp/kernel
+          
+          # Download kernel artifacts
+          echo "Downloading bzImage..."
+          if ! gh release download "$RELEASE_TAG" --repo "yonch/linux" --pattern "bzImage" --output bzImage; then
+            echo "Failed to download bzImage from release $RELEASE_TAG"
+            exit 1
+          fi
+          
+          echo "Downloading initrd.img..."
+          if ! gh release download "$RELEASE_TAG" --repo "yonch/linux" --pattern "initrd.img" --output initrd.img; then
+            echo "Failed to download initrd.img from release $RELEASE_TAG"
+            exit 1
+          fi
+          
+          # Check for kernel modules
+          if gh release download "$RELEASE_TAG" --repo "yonch/linux" --pattern "modules-*.tar.gz" 2>/dev/null; then
+            echo "Kernel modules archive downloaded"
+            MODULES_ARCHIVE=$(ls modules-*.tar.gz | head -1)
+            KERNEL_VERSION=$(echo "$MODULES_ARCHIVE" | sed 's/modules-\(.*\)\.tar\.gz/\1/')
+            echo "kernel-version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+            
+            # Install modules
+            echo "Installing kernel modules..."
+            mkdir -p "/lib/modules/$KERNEL_VERSION"
+            tar -xzf "$MODULES_ARCHIVE" -C "/lib/modules/$KERNEL_VERSION" --strip-components=1
+            depmod -a "$KERNEL_VERSION"
+          else
+            echo "No kernel modules found"
+            # Extract version from release tag as fallback
+            KERNEL_VERSION="${RELEASE_TAG}"
+            echo "kernel-version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Kernel artifacts ready for kexec"
+          ls -la /tmp/kernel/
+      
+      - name: Prepare kexec runner registration
+        if: steps.kernel-mode.outputs.mode == 'custom'
+        id: prepare-kexec
+        run: |
+          # Generate final runner label
+          TIMESTAMP=$(date +%s)
+          KERNEL_TAG="${{ inputs.kernel-release-tag }}"
+          # Sanitize kernel tag for use in label
+          SAFE_TAG=$(echo "$KERNEL_TAG" | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-50)
+          FINAL_LABEL="runner-${SAFE_TAG}-${{ github.run_id }}-${TIMESTAMP}"
+          echo "final-label=${FINAL_LABEL}" >> $GITHUB_OUTPUT
+          echo "Final runner label: ${FINAL_LABEL}"
+          
+          # Prepare runner for post-kexec registration
+          mkdir -p /opt/actions-runner-final
+          cd /opt/actions-runner-final
+          
+          curl -L -o actions-runner.tar.gz \
+            "https://github.com/actions/runner/releases/download/v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
+          
+          tar xzf actions-runner.tar.gz
+          rm actions-runner.tar.gz
+          
+          # Get registration token
+          chmod +x $GITHUB_WORKSPACE/.github/scripts/runner-registration.sh
+          REGISTRATION_TOKEN=$($GITHUB_WORKSPACE/.github/scripts/runner-registration.sh get-token "${{ secrets.repo-admin-token }}")
+          
+          # Create post-kexec registration script
+          cat > /opt/runner-config.sh << EOF
+          #!/bin/bash
+          export GITHUB_REPOSITORY="yonch/linux"
+          export GITHUB_REPOSITORY_OWNER="yonch"
+          export RUNNER_NAME="${FINAL_LABEL}"
+          export RUNNER_LABELS="self-hosted,Linux,X64,${FINAL_LABEL}"
+          export REGISTRATION_TOKEN="${REGISTRATION_TOKEN}"
+          export RUNNER_DIR="/opt/actions-runner-final"
+          EOF
+          
+          chmod +x /opt/runner-config.sh
+          
+          # Create systemd service for post-kexec registration
+          cat > /etc/systemd/system/github-runner-register.service << 'EOF'
+          [Unit]
+          Description=GitHub Runner Registration after Kexec
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/register-and-start-runner.sh
+          StandardOutput=journal+console
+          StandardError=journal+console
+          TimeoutStartSec=300
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > /opt/register-and-start-runner.sh << 'SCRIPT'
+          #!/bin/bash
+          set -x
+          
+          echo "Starting GitHub Runner Registration"
+          source /opt/runner-config.sh
+          
+          cd "$RUNNER_DIR"
+          export RUNNER_ALLOW_RUNASROOT=1
+          
+          ./config.sh \
+            --url "https://github.com/$GITHUB_REPOSITORY" \
+            --token "$REGISTRATION_TOKEN" \
+            --name "$RUNNER_NAME" \
+            --labels "$RUNNER_LABELS" \
+            --work "_work" \
+            --unattended \
+            --replace
+          
+          if [[ $? -ne 0 ]]; then
+            echo "Failed to register runner"
+            exit 1
+          fi
+          
+          echo "Runner registered successfully"
+          
+          # Start runner
+          nohup ./run.sh > /var/log/github-runner.log 2>&1 &
+          echo "Runner started with PID: $!"
+          SCRIPT
+          
+          chmod +x /opt/register-and-start-runner.sh
+          systemctl enable github-runner-register.service
+          
+          echo "Post-kexec runner registration prepared"
+      
+      - name: Execute kexec
+        if: steps.kernel-mode.outputs.mode == 'custom'
+        id: execute-kexec
+        run: |
+          echo "Loading kernel for kexec..."
+          
+          KERNEL="/tmp/kernel/bzImage"
+          INITRD="/tmp/kernel/initrd.img"
+          CMDLINE=$(cat /proc/cmdline)
+          
+          # Enhanced cmdline for better logging
+          ENHANCED_CMDLINE="$CMDLINE systemd.mask=multipathd.service loglevel=4"
+          
+          if ! kexec -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
+            echo "Failed to load kernel for kexec"
+            exit 1
+          fi
+          
+          echo "Kernel loaded successfully"
+          
+          # Mark for cleanup tracking
+          echo "${{ github.run_id }}" > /opt/kexec-marker
+          echo "${{ inputs.kernel-release-tag }}" > /opt/kernel-release
+          echo "${{ steps.prepare-kexec.outputs.final-label }}" > /opt/final-runner-label
+          
+          # Create kexec service
+          cat > /etc/systemd/system/perform-kexec.service << 'EOF'
+          [Unit]
+          Description=Perform kexec to custom kernel
+          DefaultDependencies=no
+          After=basic.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash -c 'sleep 10 && sync && kexec -e'
+          StandardOutput=journal+console
+          StandardError=journal+console
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl daemon-reload
+          systemctl start --no-block perform-kexec.service
+          
+          echo "Kexec initiated, system will reboot into custom kernel"
+          sleep 2
+          exit 0
+      
+      - name: Determine final runner label
+        id: determine-label
+        if: always()
+        run: |
+          if [[ "${{ steps.kernel-mode.outputs.mode }}" == "default" ]]; then
+            # For default mode, use the initial runner label as final
+            echo "final-label=${{ needs.start-ec2.outputs.initial-runner-label }}" >> $GITHUB_OUTPUT
+            echo "needs-cleanup=false" >> $GITHUB_OUTPUT
+          else
+            # For custom mode, use the prepared final label
+            echo "final-label=${{ steps.prepare-kexec.outputs.final-label }}" >> $GITHUB_OUTPUT
+            echo "needs-cleanup=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Store kernel info
+        id: kernel-info
+        if: always()
+        run: |
+          if [[ "${{ steps.kernel-mode.outputs.mode }}" == "default" ]]; then
+            echo "version=${{ steps.default-kernel-info.outputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ steps.setup-custom-kernel.outputs.kernel-version }}" >> $GITHUB_OUTPUT
+          fi
+
+  wait-for-kexec:
+    name: Wait for Custom Kernel Runner
+    needs: [start-ec2, setup-runner]
+    if: needs.setup-runner.outputs.needs-cleanup == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository (sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: yonch/linux
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Wait for custom kernel runner
+        run: |
+          echo "Waiting for custom kernel runner to come online..."
+          echo "Runner label: ${{ needs.setup-runner.outputs.final-runner-label }}"
+          
+          chmod +x .github/scripts/runner-registration.sh
+          
+          if .github/scripts/runner-registration.sh wait \
+            "${{ secrets.repo-admin-token }}" \
+            "${{ needs.setup-runner.outputs.final-runner-label }}" \
+            300 \
+            10; then
+            echo "Custom kernel runner is online!"
+          else
+            echo "Timeout waiting for custom kernel runner"
+            exit 1
+          fi
+      
+      - name: Remove initial runner
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "Removing initial runner (pre-kexec)..."
+          
+          chmod +x .github/scripts/runner-registration.sh
+          .github/scripts/runner-registration.sh remove \
+            "${{ secrets.repo-admin-token }}" \
+            "${{ needs.start-ec2.outputs.initial-runner-label }}" || true
+          
+          echo "Initial runner removed"
+
+  # Internal cleanup job - only runs on failure
+  internal-cleanup:
+    name: Internal Cleanup on Failure
+    needs: [start-ec2, setup-runner, wait-for-kexec]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: yonch/linux
+          sparse-checkout: |
+            .github/
+          sparse-checkout-cone-mode: false
+      
+      - name: Remove initial runner
+        if: needs.start-ec2.outputs.initial-runner-label
+        continue-on-error: true
+        run: |
+          echo "Cleaning up initial runner..."
+          chmod +x .github/scripts/runner-registration.sh
+          .github/scripts/runner-registration.sh remove \
+            "${{ secrets.repo-admin-token }}" \
+            "${{ needs.start-ec2.outputs.initial-runner-label }}" || true
+      
+      - name: Remove final runner
+        if: needs.setup-runner.outputs.final-runner-label && needs.setup-runner.outputs.needs-cleanup == 'true'
+        continue-on-error: true
+        run: |
+          echo "Cleaning up final runner..."
+          chmod +x .github/scripts/runner-registration.sh
+          .github/scripts/runner-registration.sh remove \
+            "${{ secrets.repo-admin-token }}" \
+            "${{ needs.setup-runner.outputs.final-runner-label }}" || true
+      
+      - name: Terminate EC2 instance
+        if: needs.start-ec2.outputs.ec2-instance-id
+        uses: ./.github/actions/aws-runner/cleanup
+        with:
+          runner-label: ${{ needs.start-ec2.outputs.initial-runner-label }}
+          ec2-instance-id: ${{ needs.start-ec2.outputs.ec2-instance-id }}
+          github-token: ${{ secrets.repo-admin-token }}
+          aws-role-arn: ${{ secrets.aws-role-arn }}
+          aws-region: ${{ needs.start-ec2.outputs.region }}

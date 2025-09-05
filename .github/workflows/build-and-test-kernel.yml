@@ -1,4 +1,4 @@
-name: Build and Test Linux Kernel with Resctrl PMU
+name: Build and Test Linux Kernel with Resctrl PMU (v2)
 on: 
   workflow_dispatch:  # Manual trigger
     inputs:
@@ -48,8 +48,8 @@ jobs:
     steps:
       - name: Verify system info
         run: |
-          echo "🚀 BUILD AND TEST LINUX KERNEL WITH RESCTRL PMU"
-          echo "================================================"
+          echo "🚀 BUILD AND TEST LINUX KERNEL WITH RESCTRL PMU (v2)"
+          echo "===================================================="
           echo ""
           echo "📍 Build instance type: ${{ inputs.build-instance-type || 'm7i.metal-24xl' }}"
           echo "📍 Test instance type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
@@ -630,358 +630,26 @@ jobs:
           echo "📦 Now proceeding to test on EC2 instance..."
           echo ""
 
-  start-initial-runner:
-    name: Start EC2 runner for testing
-    runs-on: ubuntu-latest
+  # Use reusable workflow to get a runner with custom kernel
+  get-test-runner:
+    name: Get Test Runner with Custom Kernel
     needs: build-kernel
-    outputs:
-      runner-label: ${{ steps.start-runner.outputs.runner-label }}
-      ec2-instance-id: ${{ steps.start-runner.outputs.ec2-instance-id }}
-      region: ${{ steps.start-runner.outputs.region }}
-    steps:
-      - name: Checkout repository (sparse)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/
-          sparse-checkout-cone-mode: false
-      
-      - name: Start AWS Runner
-        id: start-runner
-        uses: ./.github/actions/aws-runner
-        with:
-          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          iam-role-name: github-actions-runner
-          instance-type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
-          image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
-          volume-size: '20'
-          packages: '["kexec-tools", "curl", "jq", "gh"]'
+    uses: ./.github/workflows/runner-with-kernel.yml
+    with:
+      kernel-release-tag: ${{ needs.build-kernel.outputs.release-tag }}
+      instance-type: ${{ inputs.instance-type || 'm7i.metal-24xl' }}
+      image-type: ${{ inputs.image-type || 'ubuntu-24.04' }}
+      runner-timeout-minutes: 30
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+      aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+      repo-admin-token: ${{ secrets.REPO_ADMIN_TOKEN }}
 
-  setup-and-kexec:
-    name: Setup and kexec into custom kernel
-    runs-on: ${{ needs.start-initial-runner.outputs.runner-label }}
-    needs: [build-kernel, start-initial-runner]
-    timeout-minutes: 2
-    outputs:
-      custom-runner-label: ${{ steps.prepare-kexec.outputs.custom-runner-label }}
-      kexec-status: ${{ steps.execute-kexec.outputs.status }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/
-          sparse-checkout-cone-mode: false
-      
-      - name: System information
-        run: |
-          echo "=== System Information ==="
-          echo "Hostname: $(hostname)"
-          echo "Kernel: $(uname -r)"
-          echo "Instance type: ${{ inputs.instance-type }}"
-          echo "GitHub Runner: $(whoami)@$(hostname)"
-          echo "Working directory: $(pwd)"
-          echo "Release to test: ${{ needs.build-kernel.outputs.release-tag }}"
-          echo "=========================="
-          
-      - name: Download kernel artifacts from specific release
-        id: download-kernel
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "📦 Downloading kernel artifacts from release: ${{ needs.build-kernel.outputs.release-tag }}"
-          
-          RELEASE_TAG="${{ needs.build-kernel.outputs.release-tag }}"
-          
-          if [[ -z "$RELEASE_TAG" ]]; then
-            echo "❌ No release tag provided from build job"
-            exit 1
-          fi
-          
-          echo "Using specific release: $RELEASE_TAG"
-          echo "release-tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          
-          mkdir -p /tmp/kernel
-          cd /tmp/kernel
-          
-          echo "Downloading bzImage..."
-          if ! gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "bzImage" --output bzImage; then
-            echo "❌ Failed to download bzImage from release $RELEASE_TAG"
-            exit 1
-          fi
-          
-          echo "Downloading initrd.img..."
-          if ! gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "initrd.img" --output initrd.img; then
-            echo "❌ Failed to download initrd.img from release $RELEASE_TAG"
-            exit 1
-          fi
-          
-          echo "Checking for kernel modules archive..."
-          if gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern "modules-*.tar.gz" 2>/dev/null; then
-            echo "✅ Kernel modules archive downloaded"
-            MODULES_ARCHIVE=$(ls modules-*.tar.gz | head -1)
-            echo "modules-archive=/tmp/kernel/$MODULES_ARCHIVE" >> $GITHUB_OUTPUT
-            
-            KERNEL_VERSION=$(echo "$MODULES_ARCHIVE" | sed 's/modules-\(.*\)\.tar\.gz/\1/')
-            echo "kernel-version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
-            echo "Kernel version: $KERNEL_VERSION"
-          else
-            echo "⚠️ No kernel modules archive found"
-            echo "modules-archive=" >> $GITHUB_OUTPUT
-            echo "kernel-version=" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "✅ Kernel artifacts downloaded successfully from release $RELEASE_TAG"
-          ls -la /tmp/kernel/
-          
-      - name: Install kernel modules if available
-        run: |
-          if [[ -n "${{ steps.download-kernel.outputs.modules-archive }}" ]]; then
-            echo "📦 Installing kernel modules..."
-            
-            MODULES_ARCHIVE="${{ steps.download-kernel.outputs.modules-archive }}"
-            KERNEL_VERSION="${{ steps.download-kernel.outputs.kernel-version }}"
-            
-            mkdir -p "/lib/modules/$KERNEL_VERSION"
-            
-            echo "Extracting modules to /lib/modules/$KERNEL_VERSION..."
-            TEMP_DIR="/tmp/modules-extract"
-            mkdir -p "$TEMP_DIR"
-            tar -xzf "$MODULES_ARCHIVE" -C "$TEMP_DIR"
-            
-            if [ -d "$TEMP_DIR/artifacts" ]; then
-              cp -r "$TEMP_DIR"/artifacts/* "/lib/modules/$KERNEL_VERSION/"
-            else
-              cp -r "$TEMP_DIR"/* "/lib/modules/$KERNEL_VERSION/"
-            fi
-            
-            rm -rf "$TEMP_DIR"
-            
-            echo "Running depmod to generate module dependencies..."
-            depmod -a "$KERNEL_VERSION"
-            
-            MODULE_COUNT=$(find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | wc -l)
-            echo "✅ Installed $MODULE_COUNT kernel modules"
-            
-            echo "Sample of installed modules:"
-            find "/lib/modules/$KERNEL_VERSION" -name "*.ko" | head -10
-          else
-            echo "⚠️ No kernel modules to install"
-          fi
-          
-      - name: Download and prepare GitHub runner
-        run: |
-          echo "📦 Downloading GitHub Actions runner..."
-          
-          mkdir -p /opt/actions-runner-custom
-          cd /opt/actions-runner-custom
-          
-          curl -L -o actions-runner.tar.gz \
-            "https://github.com/actions/runner/releases/download/v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
-          
-          tar xzf actions-runner.tar.gz
-          rm actions-runner.tar.gz
-          
-          echo "✅ GitHub Actions runner downloaded and extracted"
-          ls -la /opt/actions-runner-custom/
-          
-      - name: Prepare kexec and custom runner
-        id: prepare-kexec
-        run: |
-          echo "🚀 Preparing kexec and custom runner registration..."
-          
-          CUSTOM_LABEL="custom-kernel-${{ github.run_id }}-${{ github.run_number }}"
-          echo "Custom runner label: $CUSTOM_LABEL"
-          echo "custom-runner-label=$CUSTOM_LABEL" >> $GITHUB_OUTPUT
-          
-          echo "Getting registration token..."
-          chmod +x .github/scripts/runner-registration.sh
-          REGISTRATION_TOKEN=$(.github/scripts/runner-registration.sh get-token "${{ secrets.REPO_ADMIN_TOKEN }}")
-          
-          if [[ -z "$REGISTRATION_TOKEN" ]]; then
-            echo "❌ Failed to get registration token"
-            exit 1
-          fi
-          
-          echo "✅ Got registration token"
-          
-          cat > /opt/runner-config.sh << EOF
-          #!/bin/bash
-          export GITHUB_REPOSITORY="${{ github.repository }}"
-          export GITHUB_REPOSITORY_OWNER="${{ github.repository_owner }}"
-          export RUNNER_NAME="runner-$CUSTOM_LABEL"
-          export RUNNER_LABELS="self-hosted,Linux,X64,$CUSTOM_LABEL"
-          export REGISTRATION_TOKEN="$REGISTRATION_TOKEN"
-          export RUNNER_DIR="/opt/actions-runner-custom"
-          export TESTED_RELEASE="${{ needs.build-kernel.outputs.release-tag }}"
-          EOF
-          
-          chmod +x /opt/runner-config.sh
-          
-          cat > /etc/systemd/system/github-runner-register.service << 'EOF'
-          [Unit]
-          Description=GitHub Runner Registration after Kexec
-          After=network-online.target
-          Wants=network-online.target
-          
-          [Service]
-          Type=oneshot
-          RemainAfterExit=yes
-          ExecStart=/opt/register-and-start-runner.sh
-          StandardOutput=journal+console
-          StandardError=journal+console
-          TimeoutStartSec=300
-          
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-          
-          cat > /opt/register-and-start-runner.sh << 'SCRIPT'
-          #!/bin/bash
-          set -x
-          
-          echo "=== GitHub Runner Registration Script ==="
-          echo "Starting at $(date)"
-          
-          source /opt/runner-config.sh
-          
-          cd "$RUNNER_DIR"
-          export RUNNER_ALLOW_RUNASROOT=1
-          
-          echo "Registering runner: $RUNNER_NAME"
-          echo "Labels: $RUNNER_LABELS"
-          echo "Testing release: $TESTED_RELEASE"
-          
-          ./config.sh \
-            --url "https://github.com/$GITHUB_REPOSITORY" \
-            --token "$REGISTRATION_TOKEN" \
-            --name "$RUNNER_NAME" \
-            --labels "$RUNNER_LABELS" \
-            --work "_work" \
-            --unattended \
-            --replace
-          
-          if [[ $? -ne 0 ]]; then
-            echo "❌ Failed to register runner"
-            exit 1
-          fi
-          
-          echo "✅ Runner registered successfully"
-          
-          echo "Starting runner..."
-          nohup ./run.sh > /var/log/github-runner.log 2>&1 &
-          
-          echo "✅ Runner started with PID: $!"
-          echo "=== Registration Script Complete ==="
-          SCRIPT
-          
-          chmod +x /opt/register-and-start-runner.sh
-          
-          systemctl enable github-runner-register.service
-          
-          echo "✅ Post-kexec runner registration prepared"
-          
-      - name: Configure and execute kexec
-        id: execute-kexec
-        run: |
-          echo "🚀 Configuring kexec with custom kernel..."
-          
-          KERNEL="/tmp/kernel/bzImage"
-          INITRD="/tmp/kernel/initrd.img"
-          
-          CMDLINE=$(cat /proc/cmdline)
-          echo "Current cmdline: $CMDLINE"
-          
-          ENHANCED_CMDLINE="$CMDLINE systemd.mask=multipathd.service loglevel=4"
-          echo "Enhanced cmdline: $ENHANCED_CMDLINE"
-          
-          echo "Loading kernel for kexec..."
-          if ! kexec -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
-            echo "❌ Failed to load kernel for kexec"
-            exit 1
-          fi
-          
-          echo "✅ Kernel loaded successfully"
-          
-          echo "${{ github.run_id }}" > /opt/kexec-marker
-          echo "${{ needs.build-kernel.outputs.release-tag }}" > /opt/tested-release
-          
-          cat > /etc/systemd/system/perform-kexec.service << 'EOF'
-          [Unit]
-          Description=Perform kexec to custom kernel
-          DefaultDependencies=no
-          After=basic.target
-
-          [Service]
-          Type=forking
-          ExecStart=/bin/bash -c 'nohup bash -c "sleep 15 && echo Executing kexec now... >> /var/log/kexec-setup.log && sync && kexec -e" </dev/null >/dev/null 2>&1 & echo $! > /var/run/kexec.pid'
-          PIDFile=/var/run/kexec.pid
-          StandardOutput=journal+console
-          StandardError=journal+console
-          
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-          
-          echo "🚀 Starting kexec service..."
-          systemctl daemon-reload
-          systemctl start --no-block perform-kexec.service
-          
-          sleep 1
-          
-          echo "Service status:"
-          systemctl status perform-kexec.service --no-pager || true
-          
-          echo "status=kexec-initiated" >> $GITHUB_OUTPUT
-          
-          echo "✅ Kexec service started. The system will reboot into the custom kernel in 15 seconds."
-          echo "Job completing now to allow kexec to proceed..."
-          
-          exit 0
-
-  wait-for-custom-kernel:
-    name: Wait for custom kernel runner
-    runs-on: ubuntu-latest
-    needs: [setup-and-kexec, start-initial-runner, build-kernel]
-    timeout-minutes: 10
-    outputs:
-      runner-ready: ${{ steps.wait-runner.outputs.ready }}
-    steps:
-      - name: Checkout repository (sparse)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/
-          sparse-checkout-cone-mode: false
-      
-      - name: Wait for custom kernel runner to come online
-        id: wait-runner
-        run: |
-          echo "⏳ Waiting for custom kernel runner to come online..."
-          echo "Runner label: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}"
-          echo "Testing release: ${{ needs.build-kernel.outputs.release-tag }}"
-          
-          chmod +x .github/scripts/runner-registration.sh
-          
-          if .github/scripts/runner-registration.sh wait \
-            "${{ secrets.REPO_ADMIN_TOKEN }}" \
-            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" \
-            300 \
-            10; then
-            echo "✅ Custom kernel runner is online!"
-            echo "ready=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Timeout waiting for custom kernel runner"
-            echo "ready=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
+  # Run tests on the custom kernel runner
   pmu-test:
-    name: Run PMU tests on custom kernel
-    needs: [wait-for-custom-kernel, setup-and-kexec, build-kernel]
-    if: needs.wait-for-custom-kernel.outputs.runner-ready == 'true'
-    runs-on: ${{ needs.setup-and-kexec.outputs.custom-runner-label }}
+    name: Run PMU Tests on Custom Kernel
+    needs: [get-test-runner, build-kernel]
+    runs-on: ${{ needs.get-test-runner.outputs.runner-label }}
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -998,24 +666,11 @@ jobs:
           echo "================================================"
           echo ""
           echo "📍 Kernel version: $(uname -r)"
+          echo "📍 Expected version: ${{ needs.get-test-runner.outputs.kernel-version }}"
           echo "📍 Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
           echo "⏰ System uptime: $(uptime)"
           echo "📅 Date: $(date)"
           echo ""
-          
-          if [[ -f /opt/kexec-marker ]]; then
-            echo "✅ Kexec marker found: $(cat /opt/kexec-marker)"
-          else
-            echo "⚠️ Kexec marker not found"
-          fi
-          
-          if [[ -f /opt/tested-release ]]; then
-            echo "✅ Testing release: $(cat /opt/tested-release)"
-          fi
-          
-          echo ""
-          echo "📊 GitHub runner service status:"
-          systemctl status github-runner-register.service --no-pager || true
           
       - name: Check resctrl support
         run: |
@@ -1088,13 +743,13 @@ jobs:
           
           ./resctrl_tests -t pmu
           
-      - name: Capture dmesg on test failure
+      - name: Capture test results
         if: always()
         run: |
           echo "📊 Test Results Summary"
           echo "======================="
           echo "Tested release: ${{ needs.build-kernel.outputs.release-tag }}"
-          echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
+          echo "Kernel version: ${{ needs.get-test-runner.outputs.kernel-version }}"
           echo "Test exit code: ${{ steps.run_pmu_test.outcome }}"
           
           echo ""
@@ -1118,46 +773,17 @@ jobs:
           echo "❌ PMU test failed!"
           exit 1
 
+  # Always cleanup resources
   cleanup:
-    name: Cleanup runners and EC2 instance
-    needs: [start-initial-runner, setup-and-kexec, wait-for-custom-kernel, pmu-test, build-kernel]
-    runs-on: ubuntu-latest
+    name: Cleanup Resources
+    needs: [get-test-runner, pmu-test, build-kernel]
     if: always()
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/
-          sparse-checkout-cone-mode: false
-      
-      - name: Test summary
-        run: |
-          echo "📋 Build and Test Summary"
-          echo "========================="
-          echo "Release tested: ${{ needs.build-kernel.outputs.release-tag }}"
-          echo "Kernel version: ${{ needs.build-kernel.outputs.kernel-version }}"
-          echo "Test instance: ${{ inputs.instance-type || 'm7i.metal-24xl' }}"
-          echo ""
-      
-      - name: Remove custom kernel runner from GitHub
-        if: needs.setup-and-kexec.outputs.custom-runner-label
-        continue-on-error: true
-        run: |
-          echo "🧹 Removing custom kernel runner..."
-          
-          chmod +x .github/scripts/runner-registration.sh
-          .github/scripts/runner-registration.sh remove \
-            "${{ secrets.REPO_ADMIN_TOKEN }}" \
-            "${{ needs.setup-and-kexec.outputs.custom-runner-label }}" || true
-            
-          echo "✅ Custom kernel runner removed"
-      
-      - name: Stop AWS Runner
-        uses: ./.github/actions/aws-runner/cleanup
-        with:
-          runner-label: ${{ needs.start-initial-runner.outputs.runner-label }}
-          ec2-instance-id: ${{ needs.start-initial-runner.outputs.ec2-instance-id }}
-          github-token: ${{ secrets.REPO_ADMIN_TOKEN }}
-          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ needs.start-initial-runner.outputs.region }}
+    uses: ./.github/workflows/runner-cleanup.yml
+    with:
+      runner-label: ${{ needs.get-test-runner.outputs.runner-label }}
+      ec2-instance-id: ${{ needs.get-test-runner.outputs.ec2-instance-id }}
+      region: ${{ needs.get-test-runner.outputs.region }}
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+      aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+      repo-admin-token: ${{ secrets.REPO_ADMIN_TOKEN }}
