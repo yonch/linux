@@ -29,7 +29,6 @@
 #define INITIAL_ARRAY_SIZE (INITIAL_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
 #define TEST_BUFFER_SIZE_MB 1
 #define TEST_ARRAY_SIZE (TEST_BUFFER_SIZE_MB * MB / sizeof(uint32_t))
-#define TEST_DURATION_MS 100
 #define MEASUREMENT_DELAY_MS 50
 #define DELTA_TOLERANCE_PERCENT 15
 #define PMU_RESCTRL_TOLERANCE_PERCENT 10
@@ -248,10 +247,8 @@ static void child_walk_permutation(const char *group_name, int ready_fd, int pro
 		exit(1);
 	}
 	
-	/* Traverse both 4MB and 1MB buffers for 100ms */
-	ksft_print_msg("Child: Traversing 4MB and 1MB buffers for %dms...\n", TEST_DURATION_MS);
-	struct timespec start, now;
-	clock_gettime(CLOCK_MONOTONIC, &start);
+	/* Traverse both 4MB and 1MB buffers until killed by parent */
+	ksft_print_msg("Child: Continuously traversing 4MB and 1MB buffers until killed...\n");
 	
 	while (1) {
 		/* Traverse 4MB buffer */
@@ -259,15 +256,6 @@ static void child_walk_permutation(const char *group_name, int ready_fd, int pro
 		
 		/* Traverse 1MB buffer */
 		total_checksum += traverse_permutation(test_array, TEST_ARRAY_SIZE / 2);
-		
-		/* Check if 100ms have elapsed */
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
-				  (now.tv_nsec - start.tv_nsec) / 1000000;
-		
-		if (elapsed_ms >= TEST_DURATION_MS) {
-			break;
-		}
 	}
 	
 	/* Final statistics */
