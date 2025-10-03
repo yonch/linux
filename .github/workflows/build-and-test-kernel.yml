@@ -361,12 +361,16 @@ jobs:
         run: |
           echo "🔧 Building kernel modules..."
           START_TIME=$(date +%s)
-          
+          set -o pipefail
           KBUILD_BUILD_TIMESTAMP='' make O="$BUILD_DIR" CC="ccache gcc" -j$(($(nproc) + 1)) modules 2>&1 | tee -a build.log
-          
+          MAKE_STATUS=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
           MODULE_TIME=$((END_TIME - START_TIME))
           echo "MODULE_TIME=${MODULE_TIME}" >> $GITHUB_ENV
+          if [ "$MAKE_STATUS" -ne 0 ]; then
+            echo "❌ Module build failed in ${MODULE_TIME} seconds with exit code ${MAKE_STATUS}"
+            exit "$MAKE_STATUS"
+          fi
           echo "⏰ Module build completed in ${MODULE_TIME} seconds ($((MODULE_TIME / 60))m $((MODULE_TIME % 60))s)"
 
       - name: Build initrd with dracut
