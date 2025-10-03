@@ -17,6 +17,10 @@ AlignEscapedNewlines: Left
 AlignOperands: true
 AlignTrailingComments: false
 AllowAllParametersOfDeclarationOnNextLine: false
+# Avoid breaking right after an opening '(',
+# which causes lines to end with '('. Kernel checkpatch warns on this.
+# Keep at least the first call argument on the same line as '('.
+AllowAllArgumentsOnNextLine: false
 AllowShortBlocksOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
@@ -773,7 +777,8 @@ ObjCSpaceBeforeProtocolList: true
 
 # Taken from git's rules
 PenaltyBreakAssignment: 10
-PenaltyBreakBeforeFirstCallParameter: 30
+# Strongly discourage breaking immediately after '('
+PenaltyBreakBeforeFirstCallParameter: 1000000
 PenaltyBreakComment: 10
 PenaltyBreakFirstLessLess: 0
 PenaltyBreakString: 10
