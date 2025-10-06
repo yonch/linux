@@ -736,14 +736,15 @@ jobs:
             exit 1
           fi
           
-      - name: Run PMU test
+      - name: Run PMU and CMT tests
         id: run_pmu_test
         continue-on-error: true
         run: |
-          echo "🧪 Running resctrl PMU test..."
+          echo "🧪 Running resctrl PMU and CMT tests..."
           echo "Testing kernel from release: ${{ needs.build-kernel.outputs.release-tag }}"
           
-          ./resctrl_tests -t pmu
+          # Run both PMU group tests and the CMT test (which includes PMU correctness)
+          ./resctrl_tests -t pmu,cmt
           
       - name: Capture test results
         if: always()
@@ -768,10 +769,10 @@ jobs:
           echo "================================"
           dmesg | grep -E "WARNING:|WARN_ONCE" || echo "No WARN_ONCE messages found"
           
-      - name: Fail if test failed
+      - name: Fail if tests failed
         if: steps.run_pmu_test.outcome == 'failure'
         run: |
-          echo "❌ PMU test failed!"
+          echo "❌ PMU/CMT tests failed!"
           exit 1
 
   # Always cleanup resources
