@@ -743,8 +743,11 @@ jobs:
           echo "🧪 Running resctrl PMU and CMT tests..."
           echo "Testing kernel from release: ${{ needs.build-kernel.outputs.release-tag }}"
           
-          # Run both PMU group tests and the CMT test (which includes PMU correctness)
-          ./resctrl_tests -t pmu,cmt
+          # Run PMU group tests
+          ./resctrl_tests -t pmu
+
+          # Run the CMT test (which includes PMU correctness)
+          ./resctrl_tests -t cmt
           
       - name: Capture test results
         if: always()
