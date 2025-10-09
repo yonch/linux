@@ -103,9 +103,12 @@ Input: `heavy-tests` (boolean, default: true)
 12. `make checkstack`
    - Run on the built `vmlinux` and publish report; monitor for extreme stack usage.
 
-13. linux-next integration
-   - Periodically rebase only the relevant commits onto `linux-next` (non-gating reports).
-   - Use `.github/workflows/find-relevant-base.sh linux-next/linux-next` to compute `BASE`, then operate on `BASE..HEAD`.
+13. linux-next integration (apply and build)
+   - Compute relevant base against linux-next (`.github/workflows/find-relevant-base.sh linux-next/master`).
+   - Create a patch series from `BASE..HEAD` (relevant commits only).
+   - Apply onto a local branch based on `linux-next/master` via `git am -3` (capture conflicts in logs).
+   - Build `defconfig` with GCC (`W=1`, compile bzImage) using ccache; upload logs.
+   - Fail the job if apply or build fails; still upload artifacts for triage.
 
 14. DeviceTree bindings (conditional)
    - If `Documentation/devicetree/bindings/` changes, run `make dt_binding_check` with `dtschema` and `yamllint`.

@@ -172,22 +172,90 @@ jobs:
           name: cross-compile-arm64-${{ github.sha }}
           path: arm64.log
 
-  linux-next-range:
-    name: linux-next integration (range detection only)
+  linux-next-rebase-build:
+    name: linux-next integration (apply and build)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Determine relevant base vs linux-next
+      - name: Install deps
         run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-linux-next-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
+      - name: Fetch linux-next and compute relevant base
+        id: base
+        run: |
+          set -euo pipefail
           chmod +x .github/workflows/find-relevant-base.sh || true
           git remote add linux-next https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git || true
           git fetch --no-tags linux-next +refs/heads/*:refs/remotes/linux-next/*
           BASE=$(.github/workflows/find-relevant-base.sh linux-next/master)
+          echo "base=$BASE" >> $GITHUB_OUTPUT
           echo "Relevant base: $BASE"
-          echo "Commits to rebase:"
+          echo "Commits to apply:"
           git rev-list --oneline "$BASE"..HEAD || true
+      - name: Create patch series (relevant commits only)
+        id: mkpatch
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.base.outputs.base }}"
+          mkdir -p /tmp/ln-patches
+          git format-patch -o /tmp/ln-patches "$BASE"..HEAD
+          COUNT=$(ls /tmp/ln-patches/*.patch 2>/dev/null | wc -l | tr -d ' ')
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Created $COUNT patches"
+      - name: Apply patches to linux-next
+        id: apply
+        run: |
+          set -euo pipefail
+          APPLY_STATUS=0
+          COUNT="${{ steps.mkpatch.outputs.count }}"
+          git checkout -B linux-next-try linux-next/master
+          if [ "$COUNT" = "0" ]; then
+            echo "No relevant patches to apply; skipping git am"
+          else
+            # Apply with three-way merge; capture status for upload step
+            git am -3 /tmp/ln-patches/*.patch 2>&1 | tee /tmp/linux-next-apply.log || APPLY_STATUS=$?
+          fi
+          echo "apply_status=$APPLY_STATUS" >> $GITHUB_OUTPUT
+          exit 0
+      - name: Build on linux-next (defconfig, W=1)
+        id: build
+        if: steps.apply.outputs.apply_status == '0'
+        run: |
+          set -euo pipefail
+          BUILD_DIR="/tmp/ln-build"
+          make O="$BUILD_DIR" defconfig
+          BUILD_STATUS=0
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" W=1 bzImage 2>&1 | tee /tmp/linux-next-build.log || BUILD_STATUS=$?
+          echo "build_status=$BUILD_STATUS" >> $GITHUB_OUTPUT
+          exit 0
+      - name: Upload linux-next rebase artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-next-rebase-${{ github.sha }}
+          path: |
+            /tmp/ln-patches
+            /tmp/linux-next-apply.log
+            /tmp/linux-next-build.log
+          if-no-files-found: ignore
+      - name: Fail if apply or build failed
+        if: |
+          steps.apply.outputs.apply_status != '0' ||
+          (steps.build.outcome == 'success' && steps.build.outputs.build_status != '0') ||
+          steps.build.outcome == 'failure'
+        run: |
+          echo "Apply status: ${{ steps.apply.outputs.apply_status }}"
+          echo "Build status:  ${{ steps.build.outputs.build_status }}"
+          exit 1
 
   debug-lockdep-build:
     if: inputs.heavy-tests == true
