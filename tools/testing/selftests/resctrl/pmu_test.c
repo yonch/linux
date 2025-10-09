@@ -190,6 +190,7 @@ static int test_file_safety(int pmu_type, const char *filepath)
 				       filepath);
 	}
 
+out:
 	close(fd);
 	return ret;
 }
