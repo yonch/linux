@@ -48,6 +48,13 @@ jobs:
         with:
           fetch-depth: 1000
 
+      - name: Install Python deps for SPDX check
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user ply GitPython
+
       - name: Determine base for relevant commits
         id: base
         run: |
