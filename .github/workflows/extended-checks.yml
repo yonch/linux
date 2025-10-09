@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install clang/llvm and deps
         run: |
           sudo apt-get update
@@ -49,6 +51,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install deps
         run: |
           sudo apt-get update
@@ -95,6 +99,8 @@ jobs:
         value: [y, n]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install deps
         run: |
           sudo apt-get update
@@ -123,6 +129,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install deps
         run: |
           sudo apt-get update
@@ -152,6 +160,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install aarch64 toolchain
         run: |
           sudo apt-get update
@@ -179,6 +189,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 1
+        with:
           fetch-depth: 0
       - name: Install deps
         run: |
@@ -195,7 +207,7 @@ jobs:
           set -euo pipefail
           chmod +x .github/workflows/find-relevant-base.sh || true
           git remote add linux-next https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git || true
-          git fetch --no-tags linux-next +refs/heads/*:refs/remotes/linux-next/*
+          git fetch --no-tags linux-next linux-next/master:refs/remotes/linux-next/master
           BASE=$(.github/workflows/find-relevant-base.sh linux-next/master)
           echo "base=$BASE" >> $GITHUB_OUTPUT
           echo "Relevant base: $BASE"

@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history for base detection)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -108,8 +108,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout
+      - name: Checkout (shallow)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install build deps
         run: |
           sudo apt-get update
@@ -133,8 +135,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout
+      - name: Checkout (shallow)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Install sparse and deps
         run: |
           sudo apt-get update
