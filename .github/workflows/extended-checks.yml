@@ -95,8 +95,8 @@ jobs:
           make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee "${{ matrix.symbol }}-${{ matrix.value }}.log" || true
       - uses: actions/upload-artifact@v4
         with:
-          name: kconfig-toggles-${{ github.sha }}
-          path: "*.log"
+          name: kconfig-toggle-${{ matrix.symbol }}-${{ matrix.value }}-${{ github.sha }}
+          path: "${{ matrix.symbol }}-${{ matrix.value }}.log"
 
   kconfig-net-inet:
     name: Kconfig NET=y, INET=n
@@ -152,8 +152,8 @@ jobs:
         run: |
           chmod +x .github/workflows/find-relevant-base.sh || true
           git remote add linux-next https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git || true
-          git fetch --no-tags linux-next linux-next
-          BASE=$(.github/workflows/find-relevant-base.sh linux-next/linux-next)
+          git fetch --no-tags linux-next +refs/heads/*:refs/remotes/linux-next/*
+          BASE=$(.github/workflows/find-relevant-base.sh linux-next/master)
           echo "Relevant base: $BASE"
           echo "Commits to rebase:"
           git rev-list --oneline "$BASE"..HEAD || true
@@ -186,4 +186,3 @@ jobs:
         with:
           name: debug-lockdep-build-${{ github.sha }}
           path: debug-lockdep.log
-
