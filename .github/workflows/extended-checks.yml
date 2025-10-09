@@ -221,8 +221,8 @@ jobs:
           set -euo pipefail
           chmod +x .github/workflows/find-relevant-base.sh || true
           git remote add linux-next https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git || true
-          git fetch --no-tags --depth=1000 linux-next linux-next/master:refs/remotes/linux-next/master
-          BASE=$(.github/workflows/find-relevant-base.sh linux-next/master)
+          # Let the base finder perform a shallow fetch of linux-next/master
+          BASE=$(.github/workflows/find-relevant-base.sh linux-next/master 1000)
           echo "base=$BASE" >> $GITHUB_OUTPUT
           echo "Relevant base: $BASE"
           echo "Commits to apply:"
