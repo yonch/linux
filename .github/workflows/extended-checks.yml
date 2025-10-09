@@ -1,0 +1,189 @@
+name: Extended Checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      heavy-tests:
+        description: 'Run heavy tests (debug/lockdep builds, etc.)'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  clang-defconfig-w1:
+    name: Clang/LLVM defconfig W=1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang/llvm and deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm build-essential bc kmod cpio flex bison libelf-dev libssl-dev dwarves
+      - name: Build with clang
+        run: |
+          BUILD_DIR="/tmp/ci-clang"
+          make LLVM=1 CC=clang O="$BUILD_DIR" defconfig
+          make LLVM=1 CC=clang O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee clang-warnings.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clang-defconfig-w1-${{ github.sha }}
+          path: |
+            clang-warnings.log
+            /tmp/ci-clang/.config
+
+  config-spread:
+    name: Config spread (allno/allmod/COMPILE_TEST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+      - name: allnoconfig
+        run: |
+          BUILD_DIR="/tmp/ci-allno"
+          make O="$BUILD_DIR" allnoconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee allno.log || true
+      - name: allmodconfig
+        run: |
+          BUILD_DIR="/tmp/ci-allmod"
+          make O="$BUILD_DIR" allmodconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee allmod.log || true
+      - name: defconfig + COMPILE_TEST
+        run: |
+          BUILD_DIR="/tmp/ci-compiletest"
+          make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_COMPILE_TEST
+          make O="$BUILD_DIR" olddefconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee compiletest.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-spread-${{ github.sha }}
+          path: |
+            allno.log
+            allmod.log
+            compiletest.log
+
+  kconfig-toggles:
+    name: Kconfig toggles (one-at-a-time)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [CONFIG_SMP, CONFIG_PREEMPT, CONFIG_SYSFS, CONFIG_PROC_FS]
+        value: [y, n]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+      - name: Build toggle
+        run: |
+          BUILD_DIR="/tmp/ci-toggle"
+          make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --set-val ${{ matrix.symbol }} ${{ matrix.value }}
+          make O="$BUILD_DIR" olddefconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee "${{ matrix.symbol }}-${{ matrix.value }}.log" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kconfig-toggles-${{ github.sha }}
+          path: "*.log"
+
+  kconfig-net-inet:
+    name: Kconfig NET=y, INET=n
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+      - name: Build NET=y, INET=n
+        run: |
+          BUILD_DIR="/tmp/ci-netinet"
+          make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_NET y
+          scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_INET n
+          make O="$BUILD_DIR" olddefconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee net-inet.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kconfig-net-inet-${{ github.sha }}
+          path: net-inet.log
+
+  cross-compile-arm64:
+    name: Cross-compile arm64 defconfig
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc flex bison libelf-dev libssl-dev dwarves
+      - name: Build
+        run: |
+          BUILD_DIR="/tmp/ci-arm64"
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O="$BUILD_DIR" defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O="$BUILD_DIR" -j$(nproc) 2>&1 | tee arm64.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-compile-arm64-${{ github.sha }}
+          path: arm64.log
+
+  linux-next-range:
+    name: linux-next integration (range detection only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Determine relevant base vs linux-next
+        run: |
+          chmod +x .github/workflows/find-relevant-base.sh || true
+          git remote add linux-next https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git || true
+          git fetch --no-tags linux-next linux-next
+          BASE=$(.github/workflows/find-relevant-base.sh linux-next/linux-next)
+          echo "Relevant base: $BASE"
+          echo "Commits to rebase:"
+          git rev-list --oneline "$BASE"..HEAD || true
+
+  debug-lockdep-build:
+    if: inputs.heavy-tests == true
+    name: Debug/lockdep config build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+      - name: Build debug/lockdep variant (compile-only)
+        run: |
+          BUILD_DIR="/tmp/ci-debug"
+          make O="$BUILD_DIR" defconfig
+          # Enable a subset of heavy debug knobs
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PREEMPT \
+            --enable CONFIG_DEBUG_PREEMPT --enable CONFIG_SLUB_DEBUG \
+            --enable CONFIG_DEBUG_PAGEALLOC --enable CONFIG_DEBUG_MUTEXES \
+            --enable CONFIG_DEBUG_SPINLOCK --enable CONFIG_DEBUG_ATOMIC_SLEEP \
+            --enable CONFIG_PROVE_RCU --enable CONFIG_DEBUG_OBJECTS_RCU_HEAD \
+            --enable CONFIG_LOCKDEP
+          make O="$BUILD_DIR" olddefconfig
+          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee debug-lockdep.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-lockdep-build-${{ github.sha }}
+          path: debug-lockdep.log
+
