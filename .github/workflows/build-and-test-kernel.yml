@@ -120,6 +120,11 @@ jobs:
         run: |
           BUILD_DIR="/tmp/ci-defconfig"
           make O="$BUILD_DIR" defconfig
+          # Ensure resctrl is built so pmu.c is compiled under defconfig job
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
+          make O="$BUILD_DIR" olddefconfig
           make O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee warnings.log
           : # Do not fail on warnings; gating is by repo settings
       - name: Upload artifacts
@@ -147,6 +152,10 @@ jobs:
         run: |
           BUILD_DIR="/tmp/ci-sparse"
           make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
+          make O="$BUILD_DIR" olddefconfig
           make O="$BUILD_DIR" -j$(nproc) C=1 W=1 CHECK=sparse CF="-D__CHECK_ENDIAN__" 2> sparse.log || true
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

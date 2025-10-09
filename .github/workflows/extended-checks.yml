@@ -36,6 +36,11 @@ jobs:
         run: |
           BUILD_DIR="/tmp/ci-clang"
           make LLVM=1 CC="ccache clang" O="$BUILD_DIR" defconfig
+          # Force-enable resctrl on x86 so fs/resctrl/pmu.c is built
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
+          make LLVM=1 CC="ccache clang" O="$BUILD_DIR" olddefconfig
           make LLVM=1 CC="ccache clang" O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee clang-warnings.log
       - uses: actions/upload-artifact@v4
         if: always()
@@ -77,6 +82,10 @@ jobs:
           BUILD_DIR="/tmp/ci-compiletest"
           make O="$BUILD_DIR" defconfig
           scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_COMPILE_TEST
+          # Ensure resctrl is covered in this build
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
           make O="$BUILD_DIR" olddefconfig
           make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee compiletest.log || true
       - uses: actions/upload-artifact@v4
@@ -114,6 +123,10 @@ jobs:
         run: |
           BUILD_DIR="/tmp/ci-toggle"
           make O="$BUILD_DIR" defconfig
+          # Keep resctrl enabled while toggling other symbols
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
           scripts/config --file "$BUILD_DIR/.config" --set-val ${{ matrix.symbol }} ${{ matrix.value }}
           make O="$BUILD_DIR" olddefconfig
           make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee "${{ matrix.symbol }}-${{ matrix.value }}.log" || true
@@ -144,6 +157,9 @@ jobs:
         run: |
           BUILD_DIR="/tmp/ci-netinet"
           make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
           scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_NET y
           scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_INET n
           make O="$BUILD_DIR" olddefconfig
@@ -245,6 +261,10 @@ jobs:
           set -euo pipefail
           BUILD_DIR="/tmp/ln-build"
           make O="$BUILD_DIR" defconfig
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_X86_CPU_RESCTRL || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_MISC_FILESYSTEMS || true
+          scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_PROC_FS || true
+          make O="$BUILD_DIR" olddefconfig
           BUILD_STATUS=0
           make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" W=1 bzImage 2>&1 | tee /tmp/linux-next-build.log || BUILD_STATUS=$?
           echo "build_status=$BUILD_STATUS" >> $GITHUB_OUTPUT
