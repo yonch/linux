@@ -283,7 +283,7 @@ jobs:
           # Enhanced cmdline for better logging
           ENHANCED_CMDLINE="$CMDLINE systemd.mask=multipathd.service loglevel=4"
           
-          if ! kexec -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
+          if ! kexec -s -l "$KERNEL" --initrd="$INITRD" --append="$ENHANCED_CMDLINE"; then
             echo "Failed to load kernel for kexec"
             exit 1
           fi
