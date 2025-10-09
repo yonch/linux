@@ -95,6 +95,7 @@ jobs:
           if git diff --name-only "$BASE"..HEAD | grep -q '^Documentation/'; then
             sudo apt-get update && sudo apt-get install -y python3-pip
             python3 -m pip install --user sphinx sphinx_rtd_theme
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
             make htmldocs
           else
             echo "No documentation changes; skipping"
