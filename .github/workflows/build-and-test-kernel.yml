@@ -38,6 +38,119 @@ permissions:
   id-token: write # Required for AWS authentication
 
 jobs:
+  patch-checks:
+    name: Patch Hygiene and Style
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine base for relevant commits
+        id: base
+        run: |
+          chmod +x .github/workflows/find-relevant-base.sh || true
+          BASE_REF="origin/${GITHUB_BASE_REF:-${{ github.event.repository.default_branch }}}"
+          BASE_SHA=$(.github/workflows/find-relevant-base.sh "$BASE_REF")
+          echo "base=$BASE_SHA" >> $GITHUB_OUTPUT
+
+      - name: Collect relevant changed files
+        id: files
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          if [ -z "$BASE" ]; then echo "No base computed"; exit 0; fi
+          mapfile -t FILES < <(git diff --name-only "$BASE"..HEAD | grep '/' | grep -vE '^(scratchpad/|scripts/|\.github/)' || true)
+          count="${#FILES[@]}"
+          echo "count=$count" >> $GITHUB_OUTPUT
+          printf "%s\n" "${FILES[@]}" | tee files.txt
+
+      - name: checkpatch
+        if: steps.files.outputs.count != '0'
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          mapfile -t FILES < files.txt
+          OPTS="--show-types --strict --max-line-length=0"
+          if command -v codespell >/dev/null 2>&1; then OPTS="$OPTS --codespell"; fi
+          git format-patch --stdout "$BASE"..HEAD -- "${FILES[@]}" | scripts/checkpatch.pl $OPTS | tee checkpatch.log
+          if grep -q "^ERROR:" checkpatch.log; then echo "checkpatch errors found"; exit 1; fi
+
+      - name: Whitespace check
+        if: steps.files.outputs.count != '0'
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          git diff --check "$BASE"..HEAD -- $(cat files.txt)
+
+      - name: Docs build (conditional)
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          if git diff --name-only "$BASE"..HEAD | grep -q '^Documentation/'; then
+            sudo apt-get update && sudo apt-get install -y python3-pip
+            python3 -m pip install --user sphinx sphinx_rtd_theme
+            make htmldocs
+          else
+            echo "No documentation changes; skipping"
+          fi
+
+      - name: Upload patch-check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-checks-${{ github.sha }}
+          path: |
+            checkpatch.log
+            files.txt
+          if-no-files-found: ignore
+
+  gcc-defconfig-w1:
+    name: GCC defconfig W=1 build (parallel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc kmod cpio flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Build defconfig with W=1
+        run: |
+          BUILD_DIR="/tmp/ci-defconfig"
+          make O="$BUILD_DIR" defconfig
+          make O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee warnings.log
+          : # Do not fail on warnings; gating is by repo settings
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcc-defconfig-w1-${{ github.sha }}
+          path: |
+            warnings.log
+            /tmp/ci-defconfig/.config
+
+  sparse-defconfig:
+    name: Sparse analysis (defconfig)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install sparse and deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev sparse
+      - name: Run sparse C=1 W=1
+        run: |
+          BUILD_DIR="/tmp/ci-sparse"
+          make O="$BUILD_DIR" defconfig
+          make O="$BUILD_DIR" -j$(nproc) C=1 W=1 CHECK=sparse CF="-D__CHECK_ENDIAN__" 2> sparse.log || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparse-defconfig-${{ github.sha }}
+          path: |
+            sparse.log
+
   build-kernel:
     name: Build Linux Kernel
     runs-on: ubuntu-latest
