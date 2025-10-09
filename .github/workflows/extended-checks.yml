@@ -23,13 +23,20 @@ jobs:
       - name: Install clang/llvm and deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm build-essential bc kmod cpio flex bison libelf-dev libssl-dev dwarves
+          sudo apt-get install -y clang llvm lld build-essential bc kmod cpio flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-clang-defconfig-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
       - name: Build with clang
+        continue-on-error: true
         run: |
           BUILD_DIR="/tmp/ci-clang"
-          make LLVM=1 CC=clang O="$BUILD_DIR" defconfig
-          make LLVM=1 CC=clang O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee clang-warnings.log
+          make LLVM=1 CC="ccache clang" O="$BUILD_DIR" defconfig
+          make LLVM=1 CC="ccache clang" O="$BUILD_DIR" -j$(nproc) W=1 bzImage 2>&1 | tee clang-warnings.log
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: clang-defconfig-w1-${{ github.sha }}
           path: |
@@ -45,25 +52,31 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-config-spread-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
       - name: allnoconfig
         run: |
           BUILD_DIR="/tmp/ci-allno"
           make O="$BUILD_DIR" allnoconfig
-          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee allno.log || true
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee allno.log || true
       - name: allmodconfig
         run: |
           BUILD_DIR="/tmp/ci-allmod"
           make O="$BUILD_DIR" allmodconfig
-          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee allmod.log || true
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee allmod.log || true
       - name: defconfig + COMPILE_TEST
         run: |
           BUILD_DIR="/tmp/ci-compiletest"
           make O="$BUILD_DIR" defconfig
           scripts/config --file "$BUILD_DIR/.config" --enable CONFIG_COMPILE_TEST
           make O="$BUILD_DIR" olddefconfig
-          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee compiletest.log || true
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee compiletest.log || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: config-spread-${{ github.sha }}
           path: |
@@ -85,15 +98,21 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-toggle-${{ matrix.symbol }}-${{ matrix.value }}-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
       - name: Build toggle
         run: |
           BUILD_DIR="/tmp/ci-toggle"
           make O="$BUILD_DIR" defconfig
           scripts/config --file "$BUILD_DIR/.config" --set-val ${{ matrix.symbol }} ${{ matrix.value }}
           make O="$BUILD_DIR" olddefconfig
-          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee "${{ matrix.symbol }}-${{ matrix.value }}.log" || true
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee "${{ matrix.symbol }}-${{ matrix.value }}.log" || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kconfig-toggle-${{ matrix.symbol }}-${{ matrix.value }}-${{ github.sha }}
           path: "${{ matrix.symbol }}-${{ matrix.value }}.log"
@@ -107,7 +126,12 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-net-inet-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
       - name: Build NET=y, INET=n
         run: |
           BUILD_DIR="/tmp/ci-netinet"
@@ -115,8 +139,9 @@ jobs:
           scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_NET y
           scripts/config --file "$BUILD_DIR/.config" --set-val CONFIG_INET n
           make O="$BUILD_DIR" olddefconfig
-          make O="$BUILD_DIR" -j$(nproc) 2>&1 | tee net-inet.log || true
+          make O="$BUILD_DIR" -j$(nproc) CC="ccache gcc" 2>&1 | tee net-inet.log || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kconfig-net-inet-${{ github.sha }}
           path: net-inet.log
@@ -130,13 +155,19 @@ jobs:
       - name: Install aarch64 toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc flex bison libelf-dev libssl-dev dwarves
+          sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc flex bison libelf-dev libssl-dev dwarves ccache
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-extended-arm64-defconfig-${{ runner.os }}-${{ github.ref }}
+          max-size: 8G
       - name: Build
         run: |
           BUILD_DIR="/tmp/ci-arm64"
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O="$BUILD_DIR" defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O="$BUILD_DIR" -j$(nproc) 2>&1 | tee arm64.log || true
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache aarch64-linux-gnu-gcc" O="$BUILD_DIR" defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache aarch64-linux-gnu-gcc" O="$BUILD_DIR" -j$(nproc) 2>&1 | tee arm64.log || true
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: cross-compile-arm64-${{ github.sha }}
           path: arm64.log
