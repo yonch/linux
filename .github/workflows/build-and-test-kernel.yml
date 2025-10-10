@@ -73,6 +73,13 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           printf "%s\n" "${FILES[@]}" | tee files.txt
 
+      - name: Configure git identity for signoff
+        if: steps.files.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --list | grep -E 'user.name|user.email'
+
       - name: checkpatch
         if: steps.files.outputs.count != '0'
         run: |
