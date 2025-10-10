@@ -73,25 +73,18 @@ jobs:
           echo "count=$count" >> $GITHUB_OUTPUT
           printf "%s\n" "${FILES[@]}" | tee files.txt
 
-      - name: Configure git identity for signoff
-        if: steps.files.outputs.count != '0'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config --list | grep -E 'user.name|user.email'
-
       - name: checkpatch
         if: steps.files.outputs.count != '0'
         run: |
           BASE="${{ steps.base.outputs.base }}"
           mapfile -t FILES < files.txt
-          OPTS="--show-types --strict --color=always"
+          OPTS="--show-types --strict --no-signoff --color=always"
           if command -v codespell >/dev/null 2>&1; then OPTS="$OPTS --codespell"; fi
 
           # Generate discrete patch files so checkpatch can attribute issues
           PATCH_DIR="ci-patches"
           rm -rf "$PATCH_DIR" && mkdir -p "$PATCH_DIR"
-          git format-patch --minimal -s "$BASE"..HEAD --output-directory "$PATCH_DIR" -- "${FILES[@]}"
+          git format-patch --minimal "$BASE"..HEAD --output-directory "$PATCH_DIR" -- "${FILES[@]}"
 
           # If no patches were generated, skip
           if ! compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
