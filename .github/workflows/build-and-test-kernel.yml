@@ -85,7 +85,7 @@ jobs:
         run: |
           BASE="${{ steps.base.outputs.base }}"
           mapfile -t FILES < files.txt
-          OPTS="--show-types --strict --max-line-length=0 --color=always"
+          OPTS="--show-types --strict --color=always"
           if command -v codespell >/dev/null 2>&1; then OPTS="$OPTS --codespell"; fi
 
           # Generate discrete patch files so checkpatch can attribute issues
