@@ -30,24 +30,18 @@ if [[ -z "${BASE_REF}" ]]; then
   fi
 fi
 
-# Ensure we have the target remote ref with limited history.
-# Parse remote and branch from BASE_REF, e.g., origin/main or linux-next/master
+# Parse remote and branch from BASE_REF (e.g., origin/main). Avoid extra fetches;
+# rely on what actions/checkout provided and fall back to origin/HEAD if needed.
 REMOTE="${BASE_REF%%/*}"
 BRANCH="${BASE_REF#*/}"
 if [[ -z "${REMOTE}" || -z "${BRANCH}" || "${REMOTE}" == "${BRANCH}" ]]; then
-  # Fallback to origin default
   REMOTE="origin"
-  # Try to derive default branch name
   if REF=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); then
     BRANCH="${REF#origin/}"
   else
     BRANCH="HEAD"
   fi
 fi
-
-# Fetch only the needed branch from the specified remote to the matching
-# remote-tracking ref with a shallow depth.
-git fetch --no-tags --depth="${DEPTH}" "${REMOTE}" "${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}" >/dev/null 2>&1 || true
 
 MERGE_BASE=$(git merge-base HEAD "${REMOTE}/${BRANCH}" 2>/dev/null || true)
 if [[ -z "${MERGE_BASE}" ]]; then

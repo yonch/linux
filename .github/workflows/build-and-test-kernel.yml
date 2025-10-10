@@ -46,7 +46,7 @@ jobs:
       - name: Checkout (shallow history for base detection)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1000
+          fetch-depth: 50
 
       - name: Install Python deps for SPDX check
         run: |
@@ -60,7 +60,7 @@ jobs:
         run: |
           chmod +x .github/workflows/find-relevant-base.sh || true
           BASE_REF="origin/${GITHUB_BASE_REF:-${{ github.event.repository.default_branch }}}"
-          BASE_SHA=$(.github/workflows/find-relevant-base.sh "$BASE_REF" 1000)
+          BASE_SHA=$(.github/workflows/find-relevant-base.sh "$BASE_REF" 50)
           echo "base=$BASE_SHA" >> $GITHUB_OUTPUT
 
       - name: Collect relevant changed files
