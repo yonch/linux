@@ -78,9 +78,22 @@ jobs:
         run: |
           BASE="${{ steps.base.outputs.base }}"
           mapfile -t FILES < files.txt
-          OPTS="--show-types --strict --max-line-length=0"
+          OPTS="--show-types --strict --max-line-length=0 --color=always"
           if command -v codespell >/dev/null 2>&1; then OPTS="$OPTS --codespell"; fi
-          git format-patch --stdout "$BASE"..HEAD -- "${FILES[@]}" | scripts/checkpatch.pl $OPTS | tee checkpatch.log
+
+          # Generate discrete patch files so checkpatch can attribute issues
+          PATCH_DIR="ci-patches"
+          rm -rf "$PATCH_DIR" && mkdir -p "$PATCH_DIR"
+          git format-patch --minimal -s "$BASE"..HEAD --output-directory "$PATCH_DIR" -- "${FILES[@]}"
+
+          # If no patches were generated, skip
+          if ! compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
+            echo "No patches generated for changed files; skipping checkpatch"
+            exit 0
+          fi
+
+          # Run checkpatch over all patch files with strict mode and color
+          scripts/checkpatch.pl $OPTS "$PATCH_DIR"/*.patch | tee checkpatch.log
           if grep -q "^ERROR:" checkpatch.log; then echo "checkpatch errors found"; exit 1; fi
 
       - name: Whitespace check
@@ -109,6 +122,7 @@ jobs:
           path: |
             checkpatch.log
             files.txt
+            ci-patches/
           if-no-files-found: ignore
 
   gcc-defconfig-w1:
