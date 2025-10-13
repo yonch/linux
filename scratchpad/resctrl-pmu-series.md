@@ -7,6 +7,17 @@ Subject: [PATCH 0/8] resctrl: Add perf PMU for resctrl monitoring
   these metrics without context switch latency and cost associated
   with userspace polling (e.g., from eBPF).
 
+  The kernel's initial interface for resctrl cache measurements was via
+  perf, merged in commit 4afbb24ce5e7 — “perf/x86/intel: Add Intel Cache
+  QoS Monitoring support” (Matt Fleming; committed by Ingo Molnar, Feb 
+  25, 2015). That interface assumed cache measurements will be 
+  transparently tied to tasks and cgroups, which did not happen. Instead,
+  resctrl provided users more control over measured groups, and the perf
+  interface, incompatible with resctrl, was removed in commit 
+  c39a0e2c8850 — “x86/perf/cqm: Wipe out perf based cqm” (Vikas Shivappa;
+  Aug 1, 2017). The removal patch noted multiple issues with the perf 
+  interface, which are now resolved with resctrl.
+
   This series introduces a “resctrl” PMU that binds a perf event to a
   resctrl monitoring file. The series refactors monitoring code to
   separate setup and execution from kernfs handlers, pins the rdtgroup
@@ -27,12 +38,6 @@ Subject: [PATCH 0/8] resctrl: Add perf PMU for resctrl monitoring
   - Read directly for perf .read without rdtgroup_mutex
   - Add selftests for PMU setup, safety, and LLC occupancy
 
-  Usage notes:
-
-  - Pass a mon_data file descriptor in attr.config
-  - Events must be CPU-bound; event_init validates the CPU belongs to
-    the file’s domain mask
-
   Patch list:
   1/8 resctrl: Pin rdtgroup in mon_data file lifetime
   2/8 resctrl/mon: Split RMID read init from execution
@@ -42,8 +47,3 @@ Subject: [PATCH 0/8] resctrl: Add perf PMU for resctrl monitoring
   6/8 resctrl/pmu: Introduce skeleton PMU and selftests
   7/8 resctrl/pmu: Use mon_event_setup_read() and validate CPU
   8/8 resctrl/pmu: Implement .read via direct RMID read; add LLC selftest
-
-  Testing:
-
-  - Selftests live under tools/testing/selftests/resctrl/
-  - Run: make kselftest TARGETS=resctrl
