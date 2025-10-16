@@ -4,7 +4,7 @@ Subject: [PATCH 0/8] resctrl: Add perf PMU for resctrl monitoring
 
 Expose resctrl monitoring data via a lightweight perf PMU. 
 
-Background: The kernel’s initial cache-monitoring interface shipped via 
+Background: The kernel's initial cache-monitoring interface shipped via 
 perf (commit 4afbb24ce5e7, 2015). That approach tied monitoring to tasks
 and cgroups. Later, cache control was designed around the resctrl 
 filesystem to better match hardware semantics, and the incompatible perf 
@@ -20,7 +20,7 @@ Parallelization and reduced jitter enable more accurate snapshots of
 cache occupancy and memory bandwidth. [1] has more details on the 
 motivation and design.
 
-Design: The "resctrl" PMU is a small adapter on top of resctrl’s 
+Design: The "resctrl" PMU is a small adapter on top of resctrl's 
 monitoring path:
 - Event selection uses `attr.config` to pass an open `mon_data` fd
   (e.g. `mon_L3_00/llc_occupancy`).
