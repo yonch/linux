@@ -28,13 +28,15 @@
 /**
  * struct arch_mbm_state - values used to compute resctrl_arch_rmid_read()s
  *			   return value.
- * @chunks:	Total data moved (multiply by rdt_group.mon_scale to get bytes)
- * @prev_msr:	Value of IA32_QM_CTR last time it was read for the RMID used to
- *		find this struct.
+ * @prev_value:	Total data moved (multiply by rdt_group.mon_scale to get bytes)
+ *		The lower 'mbm_width' bits are equal to a previously read value
+ *		of IA32_QM_CTR for the RMID. This value is used to track the
+ *		overflows of the counter in the higher bits. For this purpose,
+ *		reads just need a sufficiently recent value, not _the_ most
+ *		recent value, hence the use of WRITE_ONCE() and READ_ONCE().
  */
 struct arch_mbm_state {
-	u64	chunks;
-	u64	prev_msr;
+	u64 prev_value;
 };
 
 /* Setting bit 0 in L3_QOS_EXT_CFG enables the ABMC feature. */

@@ -179,14 +179,15 @@ void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_mon_domain *d,
 	int cpu = cpumask_any(&d->hdr.cpu_mask);
 	struct arch_mbm_state *am;
 	u32 prmid;
+	u64 msr_value;
 
 	am = get_arch_mbm_state(hw_dom, rmid, eventid);
 	if (am) {
-		memset(am, 0, sizeof(*am));
-
 		prmid = logical_rmid_to_physical_rmid(cpu, rmid);
 		/* Record any initial, non-zero count value. */
-		__rmid_read_phys(prmid, eventid, &am->prev_msr);
+		__rmid_read_phys(prmid, eventid, &msr_value);
+
+		WRITE_ONCE(am->prev_value, msr_value);
 	}
 }
 
@@ -209,52 +210,69 @@ void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_mon_domain *
 	}
 }
 
-static u64 mbm_overflow_count(u64 prev_msr, u64 cur_msr, unsigned int width)
+/*
+ * assumes @prev_value has been computed using reads *before* @cur_msr
+ */
+static u64 mbm_overflow_count(u64 prev_value, u64 cur_msr, unsigned int width)
 {
-	u64 shift = 64 - width, chunks;
+	u64 shift = 64 - width, shifted_delta;
 
-	chunks = (cur_msr << shift) - (prev_msr << shift);
-	return chunks >> shift;
+	shifted_delta = (cur_msr << shift) - (prev_value << shift);
+	return shifted_delta >> shift;
 }
 
-static u64 get_corrected_val(struct rdt_resource *r, struct rdt_mon_domain *d,
-			     u32 rmid, enum resctrl_event_id eventid, u64 msr_val)
+/*
+ * assumes @prev_value has been computed using reads *before* @msr_val
+ */
+static u64 get_corrected_val(struct rdt_resource *r, struct arch_mbm_state *am,
+			     u32 rmid, u64 msr_val, u64 prev_value)
 {
-	struct rdt_hw_mon_domain *hw_dom = resctrl_to_arch_mon_dom(d);
 	struct rdt_hw_resource *hw_res = resctrl_to_arch_res(r);
-	struct arch_mbm_state *am;
-	u64 chunks;
-
-	am = get_arch_mbm_state(hw_dom, rmid, eventid);
+	u64 unscaled_val;
 	if (am) {
-		am->chunks += mbm_overflow_count(am->prev_msr, msr_val,
+		prev_value += mbm_overflow_count(prev_value, msr_val,
 						 hw_res->mbm_width);
-		chunks = get_corrected_mbm_count(rmid, am->chunks);
-		am->prev_msr = msr_val;
+		unscaled_val = get_corrected_mbm_count(rmid, prev_value);
+		WRITE_ONCE(am->prev_value, prev_value);
 	} else {
-		chunks = msr_val;
+		unscaled_val = msr_val;
 	}
 
-	return chunks * hw_res->mon_scale;
+	return unscaled_val * hw_res->mon_scale;
 }
 
 int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_mon_domain *d,
 			   u32 unused, u32 rmid, enum resctrl_event_id eventid,
 			   u64 *val, void *ignored)
 {
+	struct rdt_hw_mon_domain *hw_dom = resctrl_to_arch_mon_dom(d);
+	struct arch_mbm_state *am;
 	int cpu = cpumask_any(&d->hdr.cpu_mask);
 	u64 msr_val;
+	u64 prev_value;
 	u32 prmid;
 	int ret;
 
 	resctrl_arch_rmid_read_context_check();
+
+	am = get_arch_mbm_state(hw_dom, rmid, eventid);
+	if (am) {
+		prev_value = READ_ONCE(am->prev_value);
+		/*
+		 * Ensure prev_value load is not reordered after the counter read.
+		 * This is needed for the overflow calculation in mbm_overflow_count().
+		 */
+		rmb();
+	} else {
+		prev_value = 0;
+	}
 
 	prmid = logical_rmid_to_physical_rmid(cpu, rmid);
 	ret = __rmid_read_phys(prmid, eventid, &msr_val);
 	if (ret)
 		return ret;
 
-	*val = get_corrected_val(r, d, rmid, eventid, msr_val);
+	*val = get_corrected_val(r, am, rmid, msr_val, prev_value);
 
 	return 0;
 }
@@ -302,13 +320,14 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_mon_domain *d,
 {
 	struct rdt_hw_mon_domain *hw_dom = resctrl_to_arch_mon_dom(d);
 	struct arch_mbm_state *am;
+	u64 msr_value;
 
 	am = get_arch_mbm_state(hw_dom, rmid, eventid);
 	if (am) {
-		memset(am, 0, sizeof(*am));
-
 		/* Record any initial, non-zero count value. */
-		__cntr_id_read(cntr_id, &am->prev_msr);
+		__cntr_id_read(cntr_id, &msr_value);
+
+		WRITE_ONCE(am->prev_value, msr_value);
 	}
 }
 
@@ -316,14 +335,29 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_mon_domain *d,
 			   u32 unused, u32 rmid, int cntr_id,
 			   enum resctrl_event_id eventid, u64 *val)
 {
+	struct rdt_hw_mon_domain *hw_dom = resctrl_to_arch_mon_dom(d);
+	struct arch_mbm_state *am;
 	u64 msr_val;
+	u64 prev_value;
 	int ret;
+
+	am = get_arch_mbm_state(hw_dom, rmid, eventid);
+	if (am) {
+		prev_value = READ_ONCE(am->prev_value);
+		/*
+		 * Ensure prev_value load is not reordered after the counter read.
+		 * This is needed for the overflow calculation in mbm_overflow_count().
+		 */
+		rmb();
+	} else {
+		prev_value = 0;
+	}
 
 	ret = __cntr_id_read(cntr_id, &msr_val);
 	if (ret)
 		return ret;
 
-	*val = get_corrected_val(r, d, rmid, eventid, msr_val);
+	*val = get_corrected_val(r, am, rmid, msr_val, prev_value);
 
 	return 0;
 }
@@ -556,7 +590,7 @@ void resctrl_arch_config_cntr(struct rdt_resource *r, struct rdt_mon_domain *d,
 	 */
 	am = get_arch_mbm_state(hw_dom, rmid, evtid);
 	if (am)
-		memset(am, 0, sizeof(*am));
+		WRITE_ONCE(am->prev_value, 0);
 }
 
 void resctrl_arch_mbm_cntr_assign_set_one(struct rdt_resource *r)
